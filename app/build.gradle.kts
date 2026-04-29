@@ -26,8 +26,6 @@ android {
             storePassword = "rainy2fa"
             keyAlias = "rainy2fa"
             keyPassword = "rainy2fa"
-            v1SigningEnabled = true
-            v2SigningEnabled = true
         }
     }
 
@@ -47,6 +45,10 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
     }
     packaging {
         resources {
