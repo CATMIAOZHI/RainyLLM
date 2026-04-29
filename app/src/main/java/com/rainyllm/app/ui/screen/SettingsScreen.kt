@@ -1,6 +1,7 @@
 package com.rainyllm.app.ui.screen
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -12,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -93,13 +95,23 @@ fun SettingsScreen() {
         keepAlive = prefs.keepAlive.first()
     }
 
-    Column(
+    val focusManager = LocalFocusManager.current
+
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(scrollState)
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+            .clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() }
+            ) { focusManager.clearFocus() }
     ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(scrollState)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
         Text("⚙️ 雨晴的小设置", style = MaterialTheme.typography.headlineSmall)
 
         // 服务器设置
@@ -342,6 +354,7 @@ fun SettingsScreen() {
         }
 
         Spacer(Modifier.height(16.dp))
+        }
     }
 
     // ── 参数说明弹窗 ──────────────────────────────────
