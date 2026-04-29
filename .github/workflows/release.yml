@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0'
+
+      - name: Generate Keystore
+        run: |
+          keytool -genkey -v -keystore release.jks -alias app \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass rainyllm2026 -keypass rainyllm2026 \
+            -dname "CN=RainyLLM" -noprompt
+
+      - run: chmod +x gradlew
+
+      - name: Fix Gradle Wrapper URL
+        run: sed -i 's|https\\://mirrors.huaweicloud.com/gradle/gradle-.*-bin.zip|https://services.gradle.org/distributions/gradle-9.1.0-bin.zip|' gradle/wrapper/gradle-wrapper.properties
+
+      - name: Set up local.properties
+        run: |
+          echo "storeFile=release.jks" > local.properties
+          echo "storePassword=rainyllm2026" >> local.properties
+          echo "keyAlias=app" >> local.properties
+          echo "keyPassword=rainyllm2026" >> local.properties
+
+      - run: ./gradlew assembleRelease
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/release/app-release.apk "RainyLLM-${GITHUB_REF#refs/tags/}.apk"
+
+      - name: Create Release & Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "🎉 RainyLLM ${{ github.ref_name }}"
+          body: |
+            ## 🎉 RainyLLM ${{ github.ref_name }}
+
+            Android 本地 LLM 推理服务器 — 在手机上跑 Gemma，开放 OpenAI 兼容 API。
+
+            ### 📦 安装
+            1. 下载 APK 安装
+            2. 打开 App，在「模型管理」中下载模型
+            3. 启动服务，API 地址 `http://127.0.0.1:8080`
+
+            ### ⚠️ 注意
+            - 模型文件需在 App 内单独下载（Gemma4-E2B 约 2.58GB）
+            - 推荐 8GB+ RAM 设备
+          files: RainyLLM-${{ github.ref_name }}.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
