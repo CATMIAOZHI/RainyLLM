@@ -22,24 +22,10 @@ jobs:
         with:
           packages: 'platforms;android-35 build-tools;35.0.0'
 
-      - name: Generate Keystore
-        run: |
-          keytool -genkey -v -keystore release.jks -alias app \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass rainyllm2026 -keypass rainyllm2026 \
-            -dname "CN=RainyLLM" -noprompt
-
       - run: chmod +x gradlew
 
       - name: Fix Gradle Wrapper URL
         run: sed -i 's|https\\://mirrors.huaweicloud.com/gradle/gradle-.*-bin.zip|https://services.gradle.org/distributions/gradle-9.1.0-bin.zip|' gradle/wrapper/gradle-wrapper.properties
-
-      - name: Set up local.properties
-        run: |
-          echo "storeFile=release.jks" > local.properties
-          echo "storePassword=rainyllm2026" >> local.properties
-          echo "keyAlias=app" >> local.properties
-          echo "keyPassword=rainyllm2026" >> local.properties
 
       - run: ./gradlew assembleRelease
 
