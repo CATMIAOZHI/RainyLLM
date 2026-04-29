@@ -1,231 +1,262 @@
-# 🤖 RainyLLM — 本地 AI 推理服务器
+# 🤖 RainyLLM (雨晴LLM)
 
 > *"在手机上跑 Gemma，开放 OpenAI 兼容 API"* 🐱☁️
 
-一个纯离线的 Android 本地 LLM 推理服务器，集成 Google LiteRT-LM 引擎运行 Gemma 4 模型，通过 NanoHTTPd 广播 OpenAI 兼容 API。
+一个纯离线的 Android 本地 LLM 推理服务器。集成 Google LiteRT-LM 引擎运行 Gemma 模型，通过 NanoHTTPd 在 `127.0.0.1` 广播 OpenAI 兼容 API，供 ChatBox、Open WebUI 等第三方 AI 客户端调用。
 
-## 📖 项目文档
-
-| 文档 | 说明 |
-|------|------|
-| [PROJECT_PLAN.md](PROJECT_PLAN.md) | 完整技术规划：架构、技术栈、代码预览、路线图、注意事项 |
-| [PROGRESS.md](PROGRESS.md) | 开发进度追踪：107 个细分任务，按阶段组织，支持状态标记 |
+![Release](https://github.com/CATMIAOZHI/RainyLLM/actions/workflows/release.yml/badge.svg)
 
 ---
 
-## 🚀 项目特性
+## ✨ 功能特性
 
-✅ **Jetpack Compose** - 现代化声明式 UI 框架  
-✅ **Material Design 3** - 最新设计规范  
-✅ **Kotlin** - 100% Kotlin 编写  
-✅ **LiteRT-LM** - Google AI Edge 本地推理引擎  
-✅ **OpenAI 兼容 API** - 供 ChatBox、Open WebUI 等客户端调用  
-✅ **纯离线** - 零联网、零费用、隐私安全  
-✅ **Gradle Version Catalog** - 统一依赖管理  
+| 特性 | 说明 |
+|------|------|
+| 🧠 **本地推理** | 基于 Google LiteRT-LM，支持 Gemma4-E2B / Gemma4-E4B / Gemma3-1B |
+| 🌐 **OpenAI 兼容 API** | `/v1/chat/completions` · `/v1/models` · `/health` |
+| 📡 **SSE 流式输出** | 原生支持 `stream: true`，逐 token 流式推送到客户端 |
+| 🖼️ **多模态** | 支持图片 (ImageBytes/ImageFile) + 音频 (AudioBytes) 输入 |
+| 🎛️ **GPU 加速** | CPU / GPU 后端可切换，GPU prefill 可达 3808 tk/s |
+| 🔒 **纯本地 · 零联网** | 127.0.0.1 绑定，不暴露到局域网，隐私安全 |
+| 📊 **实时统计** | 请求日志、Token 用量图表、引擎诊断面板 |
+| 🎨 **Material Design 3** | Jetpack Compose 构建，科技蓝紫色调 |
+| 🔌 **后台保活** | Foreground Service + WakeLock + 通知栏常驻 |
+
+---
+
+## 📦 下载
+
+前往 [Releases](https://github.com/CATMIAOZHI/RainyLLM/releases) 下载最新 APK。
+
+> ⚠️ 模型文件需在 App 内单独下载（Gemma4-E2B 约 2.58GB），不包含在 APK 中。
+
+---
+
+## 🏗️ 技术架构
+
+```
+┌──────────────────────────────────────────────────┐
+│                  Android App                       │
+│                                                    │
+│  ┌──────────────────────────────────────────────┐ │
+│  │          Compose UI（5 标签页）               │ │
+│  │  主控台 · 模型管理 · 聊天测试 · 性能 · 设置  │ │
+│  └────────────────────┬─────────────────────────┘ │
+│                       │                            │
+│  ┌────────────────────▼─────────────────────────┐ │
+│  │          HTTP Server (NanoHTTPd 2.3.1)        │ │
+│  │  POST /v1/chat/completions  ← OpenAI 兼容    │ │
+│  │  GET  /v1/models            ← 模型列表       │ │
+│  │  GET  /health               ← 健康检查       │ │
+│  │  (支持 SSE 流式 + 多模态)                    │ │
+│  └────────────────────┬─────────────────────────┘ │
+│                       │                            │
+│  ┌────────────────────▼─────────────────────────┐ │
+│  │      推理引擎 (LiteRT-LM Kotlin API)          │ │
+│  │  Engine → Conversation → sendMessageAsync()  │ │
+│  │  · GPU 加速（3808 tk/s prefill）             │ │
+│  │  · Kotlin Flow 流式输出                       │ │
+│  └────────────────────┬─────────────────────────┘ │
+│                       │                            │
+│  ┌────────────────────▼─────────────────────────┐ │
+│  │    模型存储 + 下载管理（DownloadManager）     │ │
+│  │  · .litertlm 模型文件                          │ │
+│  │  · HuggingFace LiteRT Community 下载          │ │
+│  │  · SHA256 校验 · 断点续传                     │ │
+│  └──────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────┘
+```
+
+---
 
 ## 📁 项目结构
 
 ```
 RainyLLM/
-├── app/
-│   ├── src/
-│   │   ├── main/
-│   │   │   ├── java/com/rainyllm/app/
-│   │   │   │   ├── MainActivity.kt          # 主Activity
-│   │   │   │   └── ui/navigation/
-│   │   │   │       └── Screen.kt            # 页面路由
-│   │   │   ├── res/                         # 资源文件
-│   │   │   └── AndroidManifest.xml          # 应用清单
-│   │   ├── androidTest/                     # Android测试
-│   │   └── test/                            # 单元测试
-│   ├── build.gradle.kts                     # App模块配置
-│   └── proguard-rules.pro                   # 混淆规则
-├── gradle/
-│   ├── libs.versions.toml                   # 依赖版本管理
-│   └── wrapper/                             # Gradle Wrapper
-├── build.gradle.kts                         # 项目级配置
-├── settings.gradle.kts                      # 项目设置
-├── gradle.properties                        # Gradle属性
-├── gradlew / gradlew.bat                    # Gradle命令
-├── tools/                                   # 工具目录
-├── PROJECT_PLAN.md                          # 完整技术规划
-├── PROGRESS.md                              # 开发进度追踪
-└── .gitignore                               # Git忽略
+├── app/src/main/java/com/rainyllm/app/
+│   ├── MainActivity.kt                  # 唯一 Activity（Edge-to-Edge + 5 标签页导航）
+│   ├── RainyLLMApp.kt                   # Application 类
+│   │
+│   ├── engine/                          # 推理引擎封装
+│   │   ├── LlmEngine.kt                 # LiteRT-LM Engine 封装（初始化/同步/流式推理）
+│   │   ├── ConversationPool.kt          # 多会话管理（超时自动清理）
+│   │   └── TokenEstimator.kt            # Token 计数估算
+│   │
+│   ├── server/                          # HTTP API 服务
+│   │   ├── OpenAIServer.kt              # NanoHTTPd 服务器（路由分发/CORS/SSE）
+│   │   ├── RequestParser.kt             # OpenAI 请求体解析
+│   │   └── SseFormatter.kt              # SSE 数据帧格式化
+│   │
+│   ├── model/                           # 模型管理
+│   │   ├── ModelInfo.kt                 # 模型元数据（id/size/url/sha256）
+│   │   ├── ModelRepository.kt           # 本地模型扫描/切换
+│   │   ├── ModelDownloader.kt           # DownloadManager 下载+断点续传
+│   │   └── ModelValidator.kt            # SHA256 校验
+│   │
+│   ├── service/                         # 后台服务
+│   │   ├── LlmServerService.kt          # Foreground Service（引擎+服务器保活）
+│   │   └── KeepAliveService.kt          # 通知栏保活服务
+│   │
+│   ├── data/                            # 数据层
+│   │   ├── AppPreferences.kt            # DataStore 偏好存储
+│   │   └── StatsRepository.kt           # 推理统计记录
+│   │
+│   └── ui/                              # Compose UI
+│       ├── screen/                      # 5 个页面
+│       │   ├── DashboardScreen.kt       # 主控台（服务开关/状态/统计）
+│       │   ├── ModelManagerScreen.kt    # 模型下载/切换/删除
+│       │   ├── ChatTestScreen.kt        # 内置聊天测试页
+│       │   ├── PerformanceScreen.kt     # 性能监控页
+│       │   └── SettingsScreen.kt        # 端口/后端/采样参数设置
+│       ├── component/                   # 可复用组件
+│       │   ├── ServerStatusCard.kt      # 服务状态卡片
+│       │   ├── ModelDownloadCard.kt     # 下载进度卡片
+│       │   ├── TokenStatsChart.kt       # 推理统计图表
+│       │   ├── LogViewer.kt             # 请求日志列表
+│       │   └── DebugCard.kt             # 诊断面板
+│       └── theme/                       # MD3 主题（蓝紫色调）
+│
+├── gradle/libs.versions.toml            # Version Catalog 依赖管理
+├── build.gradle.kts                     # 项目级配置
+└── settings.gradle.kts                  # 项目设置
 ```
+
+---
 
 ## 🛠️ 快速开始
 
-### 1. 环境要求
-- ✅ **JDK 17+**（必需）
-- ✅ **Gradle** (已包含 Wrapper)
-- ✅ **Android SDK** (可选，用于完整编译)
+### 方式一：Android Studio（推荐）
 
-### 2. 构建项目
+1. Clone 仓库：`git clone https://github.com/CATMIAOZHI/RainyLLM.git`
+2. 用 Android Studio 打开项目
+3. 同步 Gradle，连接设备，Run ▶️
 
-#### 使用 Operit 内置命令按钮
-- 🔧 **初始化 Gradle Wrapper** - 首次使用
-- 🔨 **构建项目** - 编译整个项目
-- 🧹 **清理构建** - 清理构建缓存
-- 📋 **查看所有任务** - 列出可用任务
-
-#### 命令行方式
-```bash
-# Linux/Mac
-./gradlew build              # 构建项目
-./gradlew assembleDebug      # 打包Debug APK
-./gradlew installDebug       # 安装到设备
-./gradlew clean              # 清理构建
-
-# Windows
-gradlew.bat build
-gradlew.bat assembleDebug
-```
-
-### 3. 生成的APK位置
-```
-app/build/outputs/apk/debug/app-debug.apk
-```
-
----
-
-## 📦 依赖管理
-
-项目使用 **Gradle Version Catalog** 统一管理依赖版本。
-
-### 查看当前依赖
-在 `gradle/libs.versions.toml` 中定义：
-
-```toml
-[versions]
-agp = "9.0.0"
-kotlin = "2.3.10"
-composeBom = "2026.01.01"
-
-[libraries]
-androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
-androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
-```
-
-### 添加新依赖
-1. 在 `gradle/libs.versions.toml` 中添加版本和库定义
-2. 在 `app/build.gradle.kts` 中引用：
-   ```kotlin
-   dependencies {
-       implementation(libs.your.library.name)
-   }
-   ```
-
----
-
-## 🎨 自定义应用
-
-### 修改应用名称
-编辑 `app/src/main/res/values/strings.xml`：
-```xml
-<string name="app_name">你的应用名</string>
-```
-
-### 修改包名
-1. 更新 `app/build.gradle.kts` 中的 `namespace` 和 `applicationId`
-2. 重命名 `java/com/rainyllm/app` 目录结构
-3. 更新 `AndroidManifest.xml` 中的包名引用
-
-### 修改主题颜色
-编辑 `app/src/main/java/.../ui/theme/Color.kt`：
-```kotlin
-val Purple80 = Color(0xFFD0BCFF)  // 修改为你的颜色
-```
-
----
-
-## 📱 Compose 示例
-
-当前 `MainActivity.kt` 包含一个简单的 Greeting 示例：
-
-```kotlin
-@Composable
-fun Greeting(name: String, modifier: Modifier = Modifier) {
-    Text(
-        text = "Hello $name!",
-        modifier = modifier
-    )
-}
-```
-
-你可以：
-- 添加更多 Composable 函数
-- 使用 Material3 组件
-- 实现导航（推荐使用 Navigation Compose）
-- 集成 ViewModel、Repository 等架构组件
-
----
-
-## 🔧 常用 Gradle 任务
+### 方式二：命令行
 
 ```bash
-./gradlew tasks              # 查看所有可用任务
-./gradlew clean              # 清理构建
-./gradlew build              # 完整构建
-./gradlew assembleDebug      # 构建Debug APK
-./gradlew assembleRelease    # 构建Release APK
-./gradlew installDebug       # 安装Debug到设备
-./gradlew test               # 运行单元测试
-./gradlew connectedAndroidTest # 运行Android测试
+# 构建 Debug APK
+./gradlew assembleDebug
+
+# 安装到设备
+./gradlew installDebug
 ```
 
----
+### 首次使用
 
-## 📝 注意事项
+1. 打开 App，进入「模型管理」标签页
+2. 下载一个模型（推荐 Gemma4-E2B，约 2.58GB）
+3. 切回「主控台」，点击「启动服务」
+4. 服务运行在 `http://127.0.0.1:8080`
 
-⚠️ **关于 Android SDK**  
-- 此模板可以在 Operit 的 Ubuntu 环境中构建
-- 完整编译需要安装 Android SDK
-- 推荐使用 Android Studio 进行完整开发
+<details>
+<summary>🔧 ARM64 环境说明（非必需）</summary>
 
-### ⚠️ ARM64 环境 AAPT2 替换（模板已内置）
+Gradle 从 Google Maven 下载的 AAPT2 在 ARM64 Linux 环境下可能无法直接运行。项目内置了 ARM64 aapt2：
 
-Gradle 会自动从 Google Maven 下载 AAPT2，但官方分发在 ARM64 Linux 环境下不可直接使用。
-此模板已经内置 ARM64 `aapt2`，`setup_android_env.sh` 会自动把它替换到 SDK build-tools 和 Gradle 缓存里。
-
-**模板内置来源**：
-- Release: https://github.com/ReVanced/aapt2/releases/tag/v1.0.0
-- ARM64 aapt2: https://github.com/ReVanced/aapt2/releases/download/v1.0.0/aapt2-arm64-v8a
-- SHA-256: `e5b5ff7f0d4f6ecd7fa5d05d77fed3f09f6f1bf80f078b8aada82bc578848561`
-
-**你只需要执行**
 ```bash
 chmod +x ./setup_android_env.sh
 ./setup_android_env.sh
 ```
 
-脚本会自动完成：
-- 替换 `$ANDROID_SDK/build-tools/35.0.0/aapt2`
-- 替换 `~/.gradle/caches/modules-2/files-2.1/com.android.tools.build/aapt2` 下的 jar 内二进制
-- 替换 `~/.gradle/caches/transforms-*` 中已经解压出来的 `aapt2`
+脚本会自动替换 SDK build-tools 和 Gradle 缓存中的 aapt2 为 ARM64 版本。
 
-⚠️ **关于包名**  
-- 当前包名为 `com.rainyllm.app`
-- 发布前请修改为你的唯一包名
-
-⚠️ **关于签名**  
-- Debug 版本自动使用调试签名
-- Release 版本需要配置签名密钥
+> 来源：[ReVanced/aapt2](https://github.com/ReVanced/aapt2/releases/tag/v1.0.0)
+</details>
 
 ---
 
-## 🌐 相关资源
+## 🔌 API 使用
 
-- [PROJECT_PLAN.md](PROJECT_PLAN.md) — RainyLLM 完整技术规划
-- [PROGRESS.md](PROGRESS.md) — 开发进度追踪
-- [Jetpack Compose 官方文档](https://developer.android.com/jetpack/compose)
-- [Material Design 3](https://m3.material.io/)
-- [Android 开发者指南](https://developer.android.com/)
-- [Kotlin 官方文档](https://kotlinlang.org/)
+### 健康检查
 
-## 💡 提示
+```bash
+curl http://127.0.0.1:8080/health
+# → {"status":"ok","model":"gemma4-e2b"}
+```
 
-- 使用 `./gradlew --scan` 可以查看详细的构建分析
-- 使用 `./gradlew build --info` 查看详细构建日志
-- 修改 `gradle.properties` 可以调整构建性能
+### 模型列表
 
-Happy Coding! 🤖✨
+```bash
+curl http://127.0.0.1:8080/v1/models
+# → {"object":"list","data":[{"id":"gemma4-e2b","object":"model","owned_by":"rainyllm"}]}
+```
+
+### 对话（同步）
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"你好"}],"stream":false}'
+```
+
+### 对话（SSE 流式）
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"写一首诗"}],"stream":true}'
+```
+
+### 客户端配置
+
+| 客户端 | 配置方式 |
+|--------|----------|
+| **ChatBox** | 设置 → 模型提供方 → OpenAI 兼容 → 填入 `http://127.0.0.1:8080` |
+| **Open WebUI** | 设置 → 连接 → OpenAI API → 填入 `http://127.0.0.1:8080/v1` |
+
+---
+
+## 📦 依赖管理
+
+项目使用 Gradle Version Catalog (`gradle/libs.versions.toml`) 统一管理依赖。
+
+| 依赖 | 用途 |
+|------|------|
+| `com.google.ai.edge.litertlm:litertlm-android` | LiteRT-LM 推理引擎 |
+| `org.nanohttpd:nanohttpd:2.3.1` | 轻量 HTTP 服务器 |
+| `org.jetbrains.kotlinx:kotlinx-coroutines-android` | 协程支持 |
+| `androidx.compose:compose-bom` | Jetpack Compose BOM |
+| `androidx.navigation:navigation-compose` | 页面导航 |
+| `androidx.datastore:datastore-preferences` | 偏好存储 |
+| `io.coil-kt:coil-compose` | 图片加载 |
+
+---
+
+## 🔒 安全说明
+
+- ✅ 服务器绑定 `127.0.0.1`，**仅限本机访问**
+- ✅ `allowBackup="false"`，拒绝应用数据被备份
+- ✅ 纯离线运行，**零网络请求**（模型下载除外）
+- ✅ 签名密钥由 GitHub Actions 在 CI 中安全生成并发布 Release APK
+
+---
+
+## ⚠️ 注意事项
+
+| 事项 | 说明 |
+|------|------|
+| 🧠 模型大小 | Gemma4-E2B 约 2.58GB，需充足存储 |
+| 📱 内存需求 | 推荐 8GB+ RAM，推理时约占用 2-3GB |
+| ⏱️ 冷启动 | `engine.initialize()` 约 10 秒，需异步执行 |
+| 🔋 电量 | 持续推理会耗电发热，有空闲超时机制 |
+| 📡 纯本地 | 127.0.0.1 不对局域网开放 |
+
+---
+
+## 🐱 关于
+
+RainyLLM 由 [雨晴喵](https://github.com/CATMIAOZHI) 与水晴共同打造，属于「雨晴系列」工具之一：
+
+- [RainyScanner](https://github.com/CATMIAOZHI/RainyScanner) — 不拦截不跳转的 Android 扫码工具
+- [Rainy2FA](https://github.com/CATMIAOZHI/Rainy2FA) — 纯本地生物识别保护的 TOTP 验证器
+- **RainyLLM** — 本地 LLM 推理服务器（本项目）
+
+---
+
+## 📄 License
+
+MIT License © 2026 Rainy
+
+---
+
+*Made with ☁️ and 🐱 paws*
