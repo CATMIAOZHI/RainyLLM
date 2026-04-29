@@ -15,6 +15,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.rainyllm.app.data.AppPreferences
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 // ── 参数说明数据 ──────────────────────────────────────
@@ -78,16 +79,16 @@ fun SettingsScreen() {
     // 弹窗状态
     var helpDialogKey by remember { mutableStateOf<String?>(null) }
 
-    // 从 DataStore 加载
+    // 从 DataStore 一次性加载初始值
     LaunchedEffect(Unit) {
-        launch { prefs.serverPort.collect { port = it; portText = it.toString() } }
-        launch { prefs.backend.collect { backend = it } }
-        launch { prefs.temperature.collect { temperature = it; tempText = "%.2f".format(it) } }
-        launch { prefs.topK.collect { topK = it; topKText = it.toString() } }
-        launch { prefs.topP.collect { topP = it; topPText = "%.2f".format(it) } }
-        launch { prefs.maxTokens.collect { maxTokens = it; maxTokensText = it.toString() } }
-        launch { prefs.idleTimeoutMin.collect { idleTimeout = it; idleTimeoutText = it.toString() } }
-        launch { prefs.keepAlive.collect { keepAlive = it } }
+        portText = prefs.serverPort.first().toString(); port = portText.toIntOrNull() ?: 8080
+        temperature = prefs.temperature.first(); tempText = "%.2f".format(temperature)
+        topK = prefs.topK.first(); topKText = topK.toString()
+        topP = prefs.topP.first(); topPText = "%.2f".format(topP)
+        maxTokens = prefs.maxTokens.first(); maxTokensText = maxTokens.toString()
+        idleTimeout = prefs.idleTimeoutMin.first(); idleTimeoutText = idleTimeout.toString()
+        backend = prefs.backend.first()
+        keepAlive = prefs.keepAlive.first()
     }
 
     Column(
@@ -110,7 +111,7 @@ fun SettingsScreen() {
                     }
                 },
                 label = { Text("端口号") },
-                supportingText = { Text("范围: 1024 – 65535，默认 8080") },
+                supportingText = { Text("范围: 1024 – 65535 | ⚠️ 需重启服务器生效") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth()
             )
@@ -118,7 +119,7 @@ fun SettingsScreen() {
 
         // 模型设置
         SettingsSection("🧠 模型设置") {
-            // 推理后端
+            // 推理后端（草稿模式：点击只改本地状态）
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -126,12 +127,12 @@ fun SettingsScreen() {
             ) {
                 FilterChip(
                     selected = backend == "cpu",
-                    onClick = { backend = "cpu"; scope.launch { prefs.setBackend("cpu") } },
+                    onClick = { backend = "cpu" },
                     label = { Text("CPU") }
                 )
                 FilterChip(
                     selected = backend == "gpu",
-                    onClick = { backend = "gpu"; scope.launch { prefs.setBackend("gpu") } },
+                    onClick = { backend = "gpu" },
                     label = { Text("GPU") }
                 )
                 Spacer(Modifier.weight(1f))
@@ -149,9 +150,7 @@ fun SettingsScreen() {
                     value = tempText,
                     onValueChange = { v ->
                         tempText = v
-                        v.toFloatOrNull()?.coerceIn(0f, 2f)?.let {
-                            temperature = it; scope.launch { prefs.setTemperature(it) }
-                        }
+                        v.toFloatOrNull()?.coerceIn(0f, 2f)?.let { temperature = it }
                     },
                     label = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -167,9 +166,7 @@ fun SettingsScreen() {
                     value = topKText,
                     onValueChange = { v ->
                         topKText = v
-                        v.toIntOrNull()?.coerceIn(1, 100)?.let {
-                            topK = it; scope.launch { prefs.setTopK(it) }
-                        }
+                        v.toIntOrNull()?.coerceIn(1, 100)?.let { topK = it }
                     },
                     label = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -194,9 +191,7 @@ fun SettingsScreen() {
                     value = topPText,
                     onValueChange = { v ->
                         topPText = v
-                        v.toFloatOrNull()?.coerceIn(0f, 1f)?.let {
-                            topP = it; scope.launch { prefs.setTopP(it) }
-                        }
+                        v.toFloatOrNull()?.coerceIn(0f, 1f)?.let { topP = it }
                     },
                     label = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -212,9 +207,7 @@ fun SettingsScreen() {
                     value = maxTokensText,
                     onValueChange = { v ->
                         maxTokensText = v
-                        v.toIntOrNull()?.coerceIn(1, 32768)?.let {
-                            maxTokens = it; scope.launch { prefs.setMaxTokens(it) }
-                        }
+                        v.toIntOrNull()?.coerceIn(1, 32768)?.let { maxTokens = it }
                     },
                     label = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -227,6 +220,47 @@ fun SettingsScreen() {
                     modifier = Modifier.weight(1f)
                 )
             }
+
+            Spacer(Modifier.height(12.dp))
+
+            // 重置 / 保存 按钮
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            temperature = prefs.temperature.first(); tempText = "%.2f".format(temperature)
+                            topK = prefs.topK.first(); topKText = topK.toString()
+                            topP = prefs.topP.first(); topPText = "%.2f".format(topP)
+                            maxTokens = prefs.maxTokens.first(); maxTokensText = maxTokens.toString()
+                            backend = prefs.backend.first()
+                        }
+                    },
+                    modifier = Modifier.weight(1f)
+                ) { Text("重置") }
+
+                Button(
+                    onClick = {
+                        scope.launch {
+                            prefs.setBackend(backend)
+                            prefs.setTemperature(temperature)
+                            prefs.setTopK(topK)
+                            prefs.setTopP(topP)
+                            prefs.setMaxTokens(maxTokens)
+                        }
+                    },
+                    modifier = Modifier.weight(1f)
+                ) { Text("保存") }
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "💡 点击「保存」后新对话生效。参数影响随机性和输出长度，修改前建议先了解含义。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
         }
 
         // 高级设置
@@ -240,9 +274,15 @@ fun SettingsScreen() {
                     }
                 },
                 label = { Text("空闲超时（分钟）") },
-                supportingText = { Text("1 – 60 分钟") },
+                supportingText = { Text("1 – 60 分钟 | ⚠️ 需重启服务器生效") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "💡 HTTP 服务器模式下，客户端会话超过此时长无活动将自动释放内存。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
             )
         }
 

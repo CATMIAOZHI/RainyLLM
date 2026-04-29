@@ -10,7 +10,10 @@ import android.util.Log
 import com.rainyllm.app.engine.ConversationPool
 import com.rainyllm.app.engine.LlmEngine
 import com.rainyllm.app.server.OpenAIServer
+import com.rainyllm.app.data.AppPreferences
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.SamplerConfig
+import kotlinx.coroutines.flow.first
 
 /**
  * LLM 推理服务器前台服务
@@ -102,11 +105,23 @@ class LlmServerService : Service() {
                 )
                 kotlinx.coroutines.runBlocking { engine.initialize() }
                 llmEngine = engine
-                conversationPool = ConversationPool(engine)
+
+                // 从设置读取空闲超时与推理参数
+                val prefs = AppPreferences(this@LlmServerService)
+                val timeoutMin = kotlinx.coroutines.runBlocking { prefs.idleTimeoutMin.first() }
+                val timeoutMs = timeoutMin * 60 * 1000L
+
+                val samplerConfig = SamplerConfig(
+                    temperature = kotlinx.coroutines.runBlocking { prefs.temperature.first() }.toDouble(),
+                    topK = kotlinx.coroutines.runBlocking { prefs.topK.first() },
+                    topP = kotlinx.coroutines.runBlocking { prefs.topP.first() }.toDouble()
+                )
+
+                conversationPool = ConversationPool(engine, idleTimeoutMs = timeoutMs, samplerConfig = samplerConfig)
                 conversationPool?.startAutoCleanup()
 
                 // 启动 HTTP 服务器
-                val server = OpenAIServer(port, engine, modelId)
+                val server = OpenAIServer(port, engine, modelId, samplerConfig)
                 server.start()
                 openAIServer = server
 

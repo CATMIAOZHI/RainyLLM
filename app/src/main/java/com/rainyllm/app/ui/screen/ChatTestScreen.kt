@@ -34,6 +34,7 @@ import coil.compose.rememberAsyncImagePainter
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.SamplerConfig
 import com.rainyllm.app.RainyLLMApp
 import com.rainyllm.app.data.AppPreferences
 import com.rainyllm.app.engine.InferenceException
@@ -212,6 +213,8 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
     // 对话历史存储
     val historyMap = remember { mutableStateMapOf<Long, ConversationRecord>() }
     val historyFile = remember { java.io.File(context.filesDir, "chat_history.json") }
+    // 当前对话的唯一标识 —— 每次"新对话"后重置，用于更新而非新增
+    var currentConversationId by remember { mutableStateOf(System.currentTimeMillis()) }
 
     // 启动时加载历史
     LaunchedEffect(Unit) {
@@ -219,8 +222,9 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
         historyMap.putAll(loaded)
     }
 
-    // 每次 historyMap 变化时保存
-    LaunchedEffect(historyMap.size) {
+    // 每次 historyMap 内容变化时保存（监听 size + 每个 record 的 messages.size）
+    val historyVersion = historyMap.size + historyMap.values.sumOf { it.messages.size }
+    LaunchedEffect(historyVersion) {
         if (historyMap.isNotEmpty()) {
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 saveHistory(historyFile, historyMap.toMap())
@@ -243,6 +247,16 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
     var imageUri by remember { mutableStateOf<Uri?>(null) }
     var audioUri by remember { mutableStateOf<Uri?>(null) }
 
+    // 从 DataStore 读取推理参数
+    var temperature by remember { mutableFloatStateOf(0.7f) }
+    var topK by remember { mutableIntStateOf(40) }
+    var topP by remember { mutableFloatStateOf(0.95f) }
+    LaunchedEffect(Unit) {
+        launch { prefs.temperature.collect { temperature = it } }
+        launch { prefs.topK.collect { topK = it } }
+        launch { prefs.topP.collect { topP = it } }
+    }
+
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) imageUri = uri
     }
@@ -253,18 +267,26 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
     // key(systemPrompt) 驱动 DisposableEffect：提示词变化时旧的 close、新的创建
     var conversation by remember { mutableStateOf<com.google.ai.edge.litertlm.Conversation?>(null) }
     DisposableEffect(systemPrompt) {
-        val config = if (systemPrompt.isNotBlank())
-            ConversationConfig(systemInstruction = Contents.of(systemPrompt))
-        else null
+        val samplerConfig = SamplerConfig(
+            temperature = temperature.toDouble(),
+            topK = topK,
+            topP = topP.toDouble()
+        )
+        val config = ConversationConfig(
+            systemInstruction = if (systemPrompt.isNotBlank()) Contents.of(systemPrompt) else null,
+            samplerConfig = samplerConfig
+        )
         val newConv = engine.createConversation(config)
         conversation = newConv
-        onDispose { newConv.close() }
+        onDispose {
+            try { newConv.close() } catch (_: Exception) {}
+        }
     }
 
     // 离开对话页时自动保存当前对话
     DisposableEffect(Unit) {
         onDispose {
-            saveCurrentConversation(messages, systemPrompt, historyMap)
+            saveCurrentConversation(messages, systemPrompt, historyMap, currentConversationId)
         }
     }
 
@@ -273,7 +295,7 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
         if (!isGenerating && messages.isNotEmpty()) {
             // 延迟一小段确保消息状态稳定
             kotlinx.coroutines.delay(1000L)
-            saveCurrentConversation(messages, systemPrompt, historyMap)
+            saveCurrentConversation(messages, systemPrompt, historyMap, currentConversationId)
         }
     }
 
@@ -326,8 +348,9 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
                     Icon(Icons.Default.History, contentDescription = "历史", modifier = Modifier.size(14.dp))
                 }
                 IconButton(onClick = {
-                    saveCurrentConversation(messages, systemPrompt, historyMap)
+                    saveCurrentConversation(messages, systemPrompt, historyMap, currentConversationId)
                     messages.clear()
+                    currentConversationId = System.currentTimeMillis()
                 }, modifier = Modifier.size(28.dp)) {
                     Icon(Icons.Default.Add, contentDescription = "新对话", modifier = Modifier.size(14.dp))
                 }
@@ -345,7 +368,9 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
                         confirmButton = {
                             TextButton(onClick = {
                                 showUnloadConfirm = false
-                                saveCurrentConversation(messages, systemPrompt, historyMap)
+                                saveCurrentConversation(messages, systemPrompt, historyMap, currentConversationId)
+                                try { conversation?.close() } catch (_: Exception) {}
+                                conversation = null
                                 onUnload()
                             }) { Text("卸载", color = MaterialTheme.colorScheme.error) }
                         },
@@ -808,25 +833,24 @@ private fun ChatInputBar(
 private fun saveCurrentConversation(
     messages: List<ChatMessage>,
     systemPrompt: String,
-    historyMap: MutableMap<Long, ConversationRecord>
+    historyMap: MutableMap<Long, ConversationRecord>,
+    conversationId: Long
 ) {
     if (messages.isEmpty()) return
-    // 用第一条用户消息的 hash 做去重 key，避免重复保存
-    val dedupKey = messages.firstOrNull { it.role == Role.USER }?.content?.hashCode() ?: messages.hashCode()
-    val existing = historyMap.values.find { rec ->
-        rec.messages.firstOrNull { it.role == Role.USER }?.content?.hashCode() == dedupKey
-    }
-    if (existing != null) return // 已保存过
 
     val firstUser = messages.firstOrNull { it.role == Role.USER }
     val title = firstUser?.content?.take(20) ?: "空对话"
+
+    // 使用稳定的 conversationId 实现 upsert：
+    // - 同一轮对话多次保存 → 覆盖更新，消息数递增
+    // - 新对话（conversationId 变化）→ 新增记录
     val record = ConversationRecord(
-        id = System.currentTimeMillis(),
+        id = conversationId,
         title = title,
         messages = messages.toList(),
         systemPrompt = systemPrompt
     )
-    historyMap[record.id] = record
+    historyMap[conversationId] = record
 }
 
 private fun saveHistory(file: java.io.File, history: Map<Long, ConversationRecord>) {

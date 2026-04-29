@@ -5,6 +5,7 @@ import android.util.Log
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.SamplerConfig
 import com.rainyllm.app.engine.LlmEngine
 import com.rainyllm.app.engine.TokenEstimator
 import kotlinx.coroutines.Dispatchers
@@ -26,7 +27,8 @@ import fi.iki.elonen.NanoHTTPD.Method
 class OpenAIServer(
     private val port: Int,
     private val llmEngine: LlmEngine,
-    private val modelId: String = "gemma4-e2b"
+    private val modelId: String = "gemma4-e2b",
+    private val defaultSamplerConfig: SamplerConfig? = null
 ) : NanoHTTPD("127.0.0.1", port) {
 
     companion object {
@@ -244,7 +246,8 @@ class OpenAIServer(
     ): Response {
         return try {
             val config = ConversationConfig(
-                systemInstruction = if (systemPrompt != null) Contents.of(systemPrompt) else null
+                systemInstruction = if (systemPrompt != null) Contents.of(systemPrompt) else null,
+                samplerConfig = defaultSamplerConfig
             )
             val result = runBlocking(Dispatchers.IO) {
                 llmEngine.createConversation(config).use { conversation ->
@@ -287,7 +290,8 @@ class OpenAIServer(
         multimodalContents: List<Content>
     ): Response {
         val config = ConversationConfig(
-            systemInstruction = if (systemPrompt != null) Contents.of(systemPrompt) else null
+            systemInstruction = if (systemPrompt != null) Contents.of(systemPrompt) else null,
+            samplerConfig = defaultSamplerConfig
         )
         val conversation = llmEngine.createConversation(config)
         val isMultimodal = multimodalContents.size > 1

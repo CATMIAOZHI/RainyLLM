@@ -11,7 +11,8 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class ConversationPool(
     private val llmEngine: LlmEngine,
-    private val idleTimeoutMs: Long = DEFAULT_IDLE_TIMEOUT_MS
+    private val idleTimeoutMs: Long = DEFAULT_IDLE_TIMEOUT_MS,
+    private val samplerConfig: SamplerConfig = defaultSamplerConfig()
 ) {
 
     companion object {
@@ -39,7 +40,7 @@ class ConversationPool(
         // 如果 Server 正持有 Conversation，不要在 Pool 中创建新的
         val config = ConversationConfig(
             systemInstruction = if (systemInstruction != null) Contents.of(systemInstruction) else null,
-            samplerConfig = samplerConfig ?: defaultSamplerConfig()
+            samplerConfig = samplerConfig ?: this.samplerConfig
         )
         val conversation = llmEngine.createConversation(config)
         val entry = ConversationEntry(id = id, conversation = conversation)
