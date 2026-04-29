@@ -20,8 +20,20 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = rootProject.file("release.jks")
+            storePassword = "rainy2fa"
+            keyAlias = "rainy2fa"
+            keyPassword = "rainy2fa"
+            v1SigningEnabled = true
+            v2SigningEnabled = true
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

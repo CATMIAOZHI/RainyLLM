@@ -22,15 +22,18 @@ jobs:
         with:
           packages: 'platforms;android-35 build-tools;35.0.0'
 
+      - name: Decode Keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.jks
+
       - run: chmod +x gradlew
 
       - name: Fix Gradle Wrapper URL
         run: sed -i 's|https\\://mirrors.huaweicloud.com/gradle/gradle-.*-bin.zip|https://services.gradle.org/distributions/gradle-9.1.0-bin.zip|' gradle/wrapper/gradle-wrapper.properties
 
-      - run: ./gradlew assembleDebug
+      - run: ./gradlew assembleRelease
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk "RainyLLM-${GITHUB_REF#refs/tags/}.apk"
+        run: cp app/build/outputs/apk/release/app-release.apk "RainyLLM-${GITHUB_REF#refs/tags/}.apk"
 
       - name: Create Release & Upload
         uses: softprops/action-gh-release@v2
