@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import com.rainyllm.app.RainyLLMApp
 import com.rainyllm.app.data.AppPreferences
 import com.rainyllm.app.data.StatsRepository
+import com.rainyllm.app.model.ModelRepository
 import com.rainyllm.app.service.LlmServerService
 import com.rainyllm.app.ui.component.DebugCard
 import com.rainyllm.app.ui.component.LogViewer
@@ -109,10 +110,12 @@ fun DashboardScreen() {
             if (!isServerRunning) {
                 Button(
                     onClick = {
+                        val repo = ModelRepository(RainyLLMApp.instance.modelsDir)
+                        val modelFile = repo.findModelFile(selectedModel)
+                            ?: java.io.File("${RainyLLMApp.instance.modelsDir}/${selectedModel}.litertlm")
                         val intent = Intent(context, LlmServerService::class.java).apply {
                             action = LlmServerService.ACTION_START_SERVER
-                            putExtra(LlmServerService.EXTRA_MODEL_PATH,
-                                "${RainyLLMApp.instance.modelsDir}/$selectedModel.litertlm")
+                            putExtra(LlmServerService.EXTRA_MODEL_PATH, modelFile.absolutePath)
                             putExtra(LlmServerService.EXTRA_CACHE_DIR, context.cacheDir.path)
                             putExtra(LlmServerService.EXTRA_PORT, port)
                             putExtra(LlmServerService.EXTRA_MODEL_ID, selectedModel)

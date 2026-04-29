@@ -23,13 +23,22 @@ class ModelRepository(private val modelsDir: File) {
         return modelsDir.listFiles()
             ?.filter { it.isFile && it.name.endsWith(EXT_LITERTLM) }
             ?.mapNotNull { file ->
+                val nameNoExt = file.nameWithoutExtension
+                // 优先精确匹配预设模型
                 val matchingPreset = ModelInfo.PRESET_MODELS.find { preset ->
-                    file.nameWithoutExtension.contains(preset.id, ignoreCase = true)
+                    nameNoExt.equals(preset.id, ignoreCase = true)
                 }
+                ?: // 若无精确匹配，检查是否以预设id开头（允许改名变体如 gemma4-e2b-v2）
+                ModelInfo.PRESET_MODELS.find { preset ->
+                    nameNoExt.startsWith(preset.id, ignoreCase = true) &&
+                        (nameNoExt.length == preset.id.length ||
+                         nameNoExt[preset.id.length] in setOf('-', '_', ' ', '.'))
+                }
+
                 DownloadedModel(
                     modelInfo = matchingPreset ?: ModelInfo(
-                        id = file.nameWithoutExtension,
-                        name = file.nameWithoutExtension,
+                        id = nameNoExt,
+                        name = nameNoExt,
                         sizeBytes = file.length(),
                         url = "",
                         sha256 = ""
@@ -39,6 +48,24 @@ class ModelRepository(private val modelsDir: File) {
                 )
             }
             ?: emptyList()
+    }
+
+    /**
+     * 智能查找模型文件
+     * 优先精确匹配 modelId.litertlm，若无则扫描目录找以 modelId 开头的文件
+     */
+    fun findModelFile(modelId: String): File? {
+        val exact = getModelFile(modelId)
+        if (exact.exists()) return exact
+
+        // 扫描同名但不同后缀变体的文件
+        return modelsDir.listFiles()
+            ?.find { it.isFile && it.name.endsWith(EXT_LITERTLM) &&
+                it.nameWithoutExtension.equals(modelId, ignoreCase = true) }
+            ?: // 宽松匹配：以 modelId 开头
+            modelsDir.listFiles()
+                ?.find { it.isFile && it.name.endsWith(EXT_LITERTLM) &&
+                    it.nameWithoutExtension.startsWith(modelId, ignoreCase = true) }
     }
 
     /**
@@ -59,7 +86,7 @@ class ModelRepository(private val modelsDir: File) {
      * 判断模型是否已下载
      */
     fun isModelDownloaded(modelId: String): Boolean {
-        return getModelFile(modelId).exists()
+        return findModelFile(modelId) != null
     }
 
     /**

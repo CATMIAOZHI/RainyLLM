@@ -39,6 +39,7 @@ import com.rainyllm.app.RainyLLMApp
 import com.rainyllm.app.data.AppPreferences
 import com.rainyllm.app.engine.InferenceException
 import com.rainyllm.app.engine.LlmEngine
+import com.rainyllm.app.model.ModelRepository
 import kotlinx.coroutines.*
 
 // ── 数据模型 ───────────────────────────────────────────
@@ -89,7 +90,9 @@ fun ChatTestScreen(
     }
 
     val effectiveModelPath = modelPath.ifEmpty {
-        "${RainyLLMApp.instance.modelsDir}/${selectedModel}.litertlm"
+        val repo = ModelRepository(RainyLLMApp.instance.modelsDir)
+        repo.findModelFile(selectedModel)?.absolutePath
+            ?: "${RainyLLMApp.instance.modelsDir}/${selectedModel}.litertlm"
     }
     val effectiveCacheDir = cacheDir.ifEmpty { context.cacheDir.path }
 

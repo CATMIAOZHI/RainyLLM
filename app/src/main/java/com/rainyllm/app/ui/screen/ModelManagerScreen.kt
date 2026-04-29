@@ -87,6 +87,13 @@ fun ModelManagerScreen() {
             }
             importMessage = if (result != null) {
                 models = repo.getAllModels()
+                // 导入成功后自动选中
+                val downloaded = repo.scanDownloadedModels()
+                    .find { it.file.name == fileName }
+                if (downloaded != null) {
+                    selectedModelId = downloaded.modelInfo.id
+                    scope.launch { prefs.setSelectedModel(downloaded.modelInfo.id) }
+                }
                 "✅ 导入成功！${result.name}"
             } else {
                 "❌ 导入失败，请检查文件是否完整喵~"
