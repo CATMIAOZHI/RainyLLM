@@ -26,7 +26,7 @@ android {
             val propsFile = rootProject.file("local.properties")
             if (propsFile.exists()) {
                 props.load(propsFile.inputStream())
-                storeFile = props.getProperty("storeFile")?.let { file(it) }
+                storeFile = props.getProperty("storeFile")?.let { java.io.File(it) }
                 storePassword = props.getProperty("storePassword") ?: ""
                 keyAlias = props.getProperty("keyAlias") ?: ""
                 keyPassword = props.getProperty("keyPassword") ?: ""
