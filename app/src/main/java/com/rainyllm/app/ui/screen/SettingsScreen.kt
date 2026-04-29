@@ -1,5 +1,6 @@
 package com.rainyllm.app.ui.screen
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -11,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -311,6 +313,7 @@ fun SettingsScreen() {
         }
 
         // ── 关于 ──────────────────────────────────────
+        val uriHandler = LocalUriHandler.current
         SettingsSection("ℹ️ 关于 RainyLLM") {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 AboutRow("版本", "1.0.0")
@@ -318,6 +321,22 @@ fun SettingsScreen() {
                 AboutRow("模型", "Gemma 4 E2B / E4B")
                 AboutRow("HTTP 服务", "NanoHTTPd 2.3.1")
                 AboutRow("UI 框架", "Jetpack Compose + Material 3")
+                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                    Text(
+                        "GitHub",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.width(80.dp)
+                    )
+                    Text(
+                        "CATMIAOZHI/RainyLLM",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable {
+                            uriHandler.openUri("https://github.com/CATMIAOZHI/RainyLLM")
+                        }
+                    )
+                }
                 AboutRow("🐱", "Made with ☁️ by Rainy & 水晴")
             }
         }
