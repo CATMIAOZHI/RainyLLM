@@ -1,0 +1,43 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+app/build/
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+.backup/
+.operit/
+.kotlin/
+
+# 模型文件（太大，不纳入版本控制）
+*.litertlm
+*.task
+*.tflite
+*.bin
+*.gguf
+models/
+
+# 签名密钥
+*.jks
+*.keystore
+release.jks
+
+# 备份文件
+*.bak
+*~
+
+# APK 产物
+*.apk
+*.aab
+
+# Log 文件
+*.log
