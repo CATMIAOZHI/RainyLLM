@@ -244,7 +244,20 @@ fun ModelManagerScreen() {
                         }
                         storageWarning = null
                         val file = repo.getModelFile(model.modelInfo.id)
-                        val downloadId = downloader.startDownload(model.modelInfo, file)
+                        val downloadId = downloader.startDownload(model.modelInfo, file, model.modelInfo.url)
+                        downloadIdsMap = downloadIdsMap + (model.modelInfo.id to downloadId)
+                        downloadingIds = downloadingIds + model.modelInfo.id
+                    },
+                    onDownloadMirror = {
+                        val minBytes = model.modelInfo.sizeBytes + 1_000_000_000L
+                        val available = downloader.checkStorageSpace(minBytes)
+                        if (available < 0) {
+                            storageWarning = "⚠️ 手机肚肚装不下啦！还需要 ${model.modelInfo.sizeGb} + 1GB 的空间哦喵~"
+                            return@ModelDownloadCard
+                        }
+                        storageWarning = null
+                        val file = repo.getModelFile(model.modelInfo.id)
+                        val downloadId = downloader.startDownload(model.modelInfo, file, model.modelInfo.mirrorUrl)
                         downloadIdsMap = downloadIdsMap + (model.modelInfo.id to downloadId)
                         downloadingIds = downloadingIds + model.modelInfo.id
                     },

@@ -18,6 +18,7 @@ fun ModelDownloadCard(
     downloadProgress: Int,
     isDownloading: Boolean,
     onDownload: () -> Unit,
+    onDownloadMirror: () -> Unit = {},
     onCancel: () -> Unit,
     onDelete: () -> Unit,
     onSelect: () -> Unit,
@@ -100,8 +101,29 @@ fun ModelDownloadCard(
                     }
                 }
                 else -> {
-                    Button(onClick = onDownload, modifier = Modifier.height(36.dp)) {
-                        Text("下载")
+                    // 两个下载源：国内镜像优先
+                    val hasMirror = model.modelInfo.mirrorUrl.isNotEmpty()
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        if (hasMirror) {
+                            OutlinedButton(
+                                onClick = onDownloadMirror,
+                                modifier = Modifier.height(36.dp),
+                                contentPadding = PaddingValues(horizontal = 8.dp)
+                            ) {
+                                Text("🌏 国内镜像", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                        TextButton(
+                            onClick = onDownload,
+                            modifier = Modifier.height(36.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp)
+                        ) {
+                            Text(
+                                if (hasMirror) "海外原链" else "下载",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             }

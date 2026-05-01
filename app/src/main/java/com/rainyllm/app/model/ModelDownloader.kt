@@ -28,12 +28,13 @@ class ModelDownloader(private val context: Context) {
         context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
 
     /**
-     * 开始下载模型（使用外部应用专属目录，避免 FileUriExposedException）
+     * 开始下载模型
      * @param modelInfo 模型信息
      * @param destination 目标文件
+     * @param downloadUrl 指定下载地址，不传则使用 modelInfo.url
      * @return 下载任务 ID
      */
-    fun startDownload(modelInfo: ModelInfo, destination: File): Long {
+    fun startDownload(modelInfo: ModelInfo, destination: File, downloadUrl: String = modelInfo.url): Long {
         val parentDir = destination.parentFile
         if (parentDir == null) {
             Log.e(TAG, "目标路径无效: $destination")
@@ -44,10 +45,8 @@ class ModelDownloader(private val context: Context) {
         if (destination.exists()) destination.delete()
 
         val fileName = destination.name
-        // setDestinationInExternalFilesDir(context, null, subPath) 写入 externalFilesDir(null)/subPath
-        // modelsDir = externalFilesDir(null)/models，所以 subPath = "models/$fileName"
         val subPath = if (parentDir.name == "models") "models/$fileName" else fileName
-        val request = DownloadManager.Request(Uri.parse(modelInfo.url)).apply {
+        val request = DownloadManager.Request(Uri.parse(downloadUrl)).apply {
             setTitle("下载 ${modelInfo.name}")
             setDescription("${modelInfo.sizeGb} · RainyLLM")
             setDestinationInExternalFilesDir(context, null, subPath)
