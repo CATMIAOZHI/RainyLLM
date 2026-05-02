@@ -35,6 +35,21 @@ class LlmEngine(
     suspend fun initialize(backend: Backend = Backend.CPU()) {
         withContext(Dispatchers.IO) {
             try {
+                // 初始化前校验模型文件，防止 JNI 层因文件不存在而闪退
+                val modelFile = java.io.File(modelPath)
+                if (!modelFile.exists()) {
+                    throw EngineInitException("模型文件不存在: $modelPath")
+                }
+
+                // 在 proot/非标准环境下，NativeLibraryLoader 可能找错 ABI 路径。
+                // APK 中已有 lib/arm64-v8a/liblitertlm_jni.so，手动触发加载。
+                try {
+                    System.loadLibrary("litertlm_jni")
+                    Log.i(TAG, "原生库 litertlm_jni 加载成功")
+                } catch (e: UnsatisfiedLinkError) {
+                    Log.w(TAG, "System.loadLibrary 失败，依赖 NativeLibraryLoader: ${e.message}")
+                }
+
                 Log.i(TAG, "开始初始化引擎... modelPath=$modelPath, backend=$backend")
                 val config = EngineConfig(
                     modelPath = modelPath,
@@ -49,6 +64,8 @@ class LlmEngine(
             } catch (e: LiteRtLmJniException) {
                 Log.e(TAG, "引擎初始化失败: ${e.message}", e)
                 throw EngineInitException("模型加载失败：${e.message}", e)
+            } catch (e: EngineInitException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "引擎初始化异常: ${e.message}", e)
                 throw EngineInitException("引擎初始化异常：${e.message}", e)

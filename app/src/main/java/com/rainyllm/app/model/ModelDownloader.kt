@@ -94,6 +94,49 @@ class ModelDownloader(private val context: Context) {
     }
 
     /**
+     * 获取已下载文件的实际本地 URI
+     */
+    fun getDownloadedFileUri(downloadId: Long): Uri? {
+        val query = DownloadManager.Query().setFilterById(downloadId)
+        val cursor = downloadManager.query(query)
+        cursor.use {
+            if (it.moveToFirst()) {
+                val status = it.getInt(it.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+                if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                    val uriStr = it.getString(it.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI))
+                    if (uriStr != null) return Uri.parse(uriStr)
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * 下载完成后规范化文件名（处理 Content-Disposition 覆盖问题）
+     * @return 重命名后（如有需要）的目标文件
+     */
+    fun normalizeDownloadedFile(downloadId: Long, expectedFile: File): File? {
+        val uri = getDownloadedFileUri(downloadId) ?: return null
+        val downloadedFile = File(uri.path ?: return null)
+        if (!downloadedFile.exists()) return null
+
+        // 如果实际文件名与期望一致，直接返回
+        if (downloadedFile.absolutePath == expectedFile.absolutePath) return downloadedFile
+        if (downloadedFile.name == expectedFile.name) return downloadedFile
+
+        // 文件名不一致（Content-Disposition 覆盖），重命名为期望文件名
+        Log.w(TAG, "文件名不匹配，重命名: ${downloadedFile.name} → ${expectedFile.name}")
+        return try {
+            if (expectedFile.exists()) expectedFile.delete()
+            downloadedFile.renameTo(expectedFile)
+            if (expectedFile.exists()) expectedFile else downloadedFile
+        } catch (e: Exception) {
+            Log.e(TAG, "重命名失败: ${e.message}", e)
+            downloadedFile  // 保留原始文件
+        }
+    }
+
+    /**
      * 监听下载完成事件
      */
     fun onDownloadComplete(): Flow<Long> = callbackFlow {

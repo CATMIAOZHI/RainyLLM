@@ -66,6 +66,7 @@
 | Maven 仓库 | Google Maven（`google()`） |
 | 推荐模型 | Gemma4-E2B（2.58GB）或 Gemma4-E4B（3.65GB） |
 | 模型来源 | [HuggingFace LiteRT Community](https://huggingface.co/litert-community) |
+| 未审查模型 | [E2B Abliterated](https://huggingface.co/nqd145/Gemma-4-E2B-it-abliterated-litertlm) · [E4B Abliterated](https://huggingface.co/typomonster/supergemma4-e4b-abliterated-litert-lm) |
 | 模型格式 | `.litertlm` |
 | 加速后端 | CPU / GPU / NPU |
 | GPU 性能 | Prefill: 3808 tk/s, Decode: 52 tk/s (S26 Ultra) |
@@ -333,6 +334,8 @@ LiteRT-LM 的 `sendMessageAsync()` 返回 `Flow<Message>`，天然适合 SSE 流
 | LiteRT-LM Android 指南 | https://ai.google.dev/edge/litert-lm/android |
 | LiteRT-LM GitHub | https://github.com/google-ai-edge/LiteRT-LM |
 | HuggingFace 模型 | https://huggingface.co/litert-community |
+| 🔥 未审查 E2B | https://huggingface.co/nqd145/Gemma-4-E2B-it-abliterated-litertlm |
+| 🔥 未审查 E4B | https://huggingface.co/typomonster/supergemma4-e4b-abliterated-litert-lm |
 | NanoHTTPd | https://github.com/NanoHttpd/nanohttpd |
 | AI Edge Gallery（参考实现） | https://github.com/google-ai-edge/gallery |
 

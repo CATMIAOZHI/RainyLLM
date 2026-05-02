@@ -35,6 +35,15 @@ class LlmServerService : Service() {
         const val EXTRA_CACHE_DIR = "cache_dir"
         const val EXTRA_PORT = "port"
         const val EXTRA_MODEL_ID = "model_id"
+
+        /** 最近一次初始化错误信息，供 UI 读取（成功时自动清空） */
+        @Volatile
+        var lastInitError: String? = null
+            private set
+
+        private fun setLastInitError(msg: String?) {
+            lastInitError = msg
+        }
     }
 
     private var llmEngine: LlmEngine? = null
@@ -87,6 +96,8 @@ class LlmServerService : Service() {
     }
 
     private fun initializeEngine(modelPath: String, cacheDir: String, port: Int, modelId: String) {
+        // 清空上次错误
+        setLastInitError(null)
         Thread {
             try {
                 updateNotification("正在加载模型…")
@@ -115,6 +126,14 @@ class LlmServerService : Service() {
                     topP = kotlinx.coroutines.runBlocking { prefs.topP.first() }.toDouble()
                 )
 
+                // 从设置读取推理后端（CPU/GPU）
+                val backendStr = kotlinx.coroutines.runBlocking { prefs.backend.first() }
+                val backend = when (backendStr.lowercase()) {
+                    "gpu" -> Backend.GPU()
+                    else -> Backend.CPU()
+                }
+                Log.i(TAG, "推理后端: $backendStr → $backend")
+
                 // 初始化引擎（initialize 是 suspend 函数，需 runBlocking 桥接）
                 val engine = LlmEngine(
                     modelPath, cacheDir,
@@ -123,11 +142,29 @@ class LlmServerService : Service() {
                     maxNumTokens = maxTokens
                 )
 
+                // ★ 关键修复：必须调用 initialize() 才能真正加载 JNI 引擎
+                kotlinx.coroutines.runBlocking {
+                    engine.initialize(backend = backend)
+                }
+                llmEngine = engine
+                Log.i(TAG, "引擎 initialize() 完成，模型已加载")
+
                 conversationPool = ConversationPool(engine, idleTimeoutMs = timeoutMs, samplerConfig = samplerConfig)
                 conversationPool?.startAutoCleanup()
 
-                // 启动 HTTP 服务器
-                val server = OpenAIServer(port, engine, modelId, samplerConfig)
+                // 启动 HTTP 服务器，传入动态 samplerConfig 供应商以支持运行时设置变更
+                val server = OpenAIServer(port, engine, modelId, samplerConfig,
+                    samplerConfigSupplier = {
+                        val p = AppPreferences(this@LlmServerService)
+                        kotlinx.coroutines.runBlocking {
+                            SamplerConfig(
+                                temperature = p.temperature.first().toDouble(),
+                                topK = p.topK.first(),
+                                topP = p.topP.first().toDouble()
+                            )
+                        }
+                    }
+                )
                 server.start()
                 openAIServer = server
 
@@ -140,7 +177,12 @@ class LlmServerService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "初始化失败: ${e.message}", e)
                 isEngineReady = false
-                updateNotification("⚠️ 加载失败: ${e.message}")
+                val errMsg = e.message ?: "未知错误"
+                setLastInitError(errMsg)
+                updateNotification("⚠️ 加载失败: $errMsg")
+                // ★ Bug修复：引擎初始化失败后停止服务，避免僵尸状态
+                stopAll()
+                stopSelf()
             }
         }.start()
     }

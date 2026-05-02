@@ -1,6 +1,7 @@
 package com.rainyllm.app.ui.screen
 
 import android.net.Uri
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
@@ -10,6 +11,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -137,19 +139,37 @@ fun ModelManagerScreen() {
                 val downloadId = downloadIdsMap[modelId] ?: return@forEach
                 val progress = downloader.queryProgress(downloadId)
                 if (progress >= 100) {
-                    // 下载完成——校验
-                    val file = repo.getModelFile(modelId)
+                    // 下载完成——规范化文件名（处理 Content-Disposition 覆盖问题）
+                    val expectedFile = repo.getModelFile(modelId)
+                    val actualFile = downloader.normalizeDownloadedFile(downloadId, expectedFile)
+                    val validatedFile = actualFile?.takeIf { it.exists() } ?: expectedFile.takeIf { it.exists() }
+                    if (validatedFile == null) {
+                        Log.w("ModelManager", "下载完成后文件不存在: $modelId")
+                        downloadingIds = downloadingIds - modelId
+                        storageWarning = "❌ 下载完成但找不到文件喵~"
+                        return@forEach
+                    }
+
+                    // 校验
                     val modelInfo = models.find { it.modelInfo.id == modelId }?.modelInfo
                     val validation = if (modelInfo != null) {
-                        ModelValidator.validate(file, modelInfo.sha256)
+                        ModelValidator.validate(validatedFile, modelInfo.sha256)
                     } else null
 
                     downloadingIds = downloadingIds - modelId
+                    // 刷新模型列表（此时新文件名应该能被 scanDownloadedModels 匹配）
                     models = repo.getAllModels()
                     downloadProgresses = downloadProgresses - modelId
+                    // 清除警告
+                    storageWarning = null
 
                     if (validation is com.rainyllm.app.model.ValidationResult.Mismatch) {
                         storageWarning = "⚠️ 哎呀喵！校验失败啦，麻烦主人重新下载一下嘛~"
+                    } else {
+                        // ✅ 下载校验成功后，自动切换到新模型
+                        selectedModelId = modelId
+                        scope.launch { prefs.setSelectedModel(modelId) }
+                        importMessage = "✅ ${modelInfo?.name ?: modelId} 已下载并自动选中喵~"
                     }
                 } else if (progress < 0) {
                     downloadingIds = downloadingIds - modelId
@@ -170,11 +190,17 @@ fun ModelManagerScreen() {
     ) {
         Text("📦 雨晴的模型小仓库", style = MaterialTheme.typography.headlineSmall)
 
-        // 操作栏：导入按钮
+        // 操作栏：重新扫描 + 导入按钮
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
+            IconButton(onClick = {
+                models = repo.getAllModels()
+                importMessage = "🔍 已重新扫描模型列表喵~"
+            }) {
+                Icon(Icons.Default.Refresh, contentDescription = "重新扫描")
+            }
             OutlinedButton(onClick = {
                 importLauncher.launch(arrayOf("application/octet-stream", "*/*"))
             }) {

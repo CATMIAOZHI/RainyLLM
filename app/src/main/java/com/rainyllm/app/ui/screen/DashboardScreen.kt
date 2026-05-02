@@ -1,6 +1,8 @@
 package com.rainyllm.app.ui.screen
 
 import android.content.Intent
+import android.util.Log
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -46,12 +48,17 @@ fun DashboardScreen() {
     var statsSummary by remember { mutableStateOf(StatsRepository.StatsSummary()) }
     var debugText by remember { mutableStateOf("") }
 
+    // 记录引擎初始化错误（供 UI 显示）
+    var initError by remember { mutableStateOf<String?>(null) }
+
     // 定时轮询服务器状态
     LaunchedEffect(Unit) {
         while (true) {
             val server = com.rainyllm.app.server.OpenAIServer.currentInstance
             isServerRunning = server?.isServerRunning == true
             isEngineReady = isServerRunning  // 服务器启动=引擎就绪
+            // ★ Bug修复：同步引擎初始化错误信息到 UI
+            initError = LlmServerService.lastInitError
             if (isServerRunning && server != null) {
                 uptimeSec = (System.currentTimeMillis() - server.getStats().startTime) / 1000
                 debugText = server.getDebugInfo()
@@ -112,7 +119,19 @@ fun DashboardScreen() {
                     onClick = {
                         val repo = ModelRepository(RainyLLMApp.instance.modelsDir)
                         val modelFile = repo.findModelFile(selectedModel)
-                            ?: java.io.File("${RainyLLMApp.instance.modelsDir}/${selectedModel}.litertlm")
+                            // 第 2 层：ID 直接拼接
+                            ?: run {
+                                val fallbackPath = java.io.File("${RainyLLMApp.instance.modelsDir}/${selectedModel}.litertlm")
+                                if (fallbackPath.exists()) fallbackPath else null
+                            }
+                            // 第 3 层：第一个已下载模型
+                            ?: repo.scanDownloadedModels().firstOrNull()?.let {
+                                Log.w("Dashboard", "未找到 $selectedModel，回退到 ${it.modelInfo.id}")
+                                selectedModel = it.modelInfo.id
+                                kotlinx.coroutines.MainScope().launch { prefs.setSelectedModel(it.modelInfo.id) }
+                                it.file
+                            }
+                            ?: java.io.File("${RainyLLMApp.instance.modelsDir}/gemma4-e2b.litertlm")
                         val intent = Intent(context, LlmServerService::class.java).apply {
                             action = LlmServerService.ACTION_START_SERVER
                             putExtra(LlmServerService.EXTRA_MODEL_PATH, modelFile.absolutePath)
@@ -121,7 +140,7 @@ fun DashboardScreen() {
                             putExtra(LlmServerService.EXTRA_MODEL_ID, selectedModel)
                         }
                         context.startForegroundService(intent)
-                        isServerRunning = true
+                        // 不在此处乐观设置 isServerRunning，由轮询从 OpenAIServer.currentInstance 同步
                         uptimeSec = 0
                     },
                     modifier = Modifier.weight(1f),
@@ -149,6 +168,35 @@ fun DashboardScreen() {
                     Icon(Icons.Default.Stop, contentDescription = null)
                     Spacer(Modifier.width(8.dp))
                     Text("抱抱！它要休息啦~")
+                }
+            }
+        }
+
+        // ★ Bug修复：引擎初始化失败时显示错误信息
+        if (!isServerRunning && initError != null) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                )
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("⚠️", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            "喵呜…启动失败了",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            initError!!,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.8f)
+                        )
+                    }
                 }
             }
         }

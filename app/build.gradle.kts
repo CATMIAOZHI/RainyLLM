@@ -1,4 +1,4 @@
-plugins {
+ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
@@ -6,6 +6,15 @@ plugins {
 android {
     namespace = "com.rainyllm.app"
     compileSdk = 35
+
+    signingConfigs {
+        create("release") {
+            storeFile = rootProject.file("release.jks")
+            storePassword = "rainy2fa"
+            keyAlias = "rainy2fa"
+            keyPassword = "rainy2fa"
+        }
+    }
 
     defaultConfig {
         applicationId = "com.rainyllm.app"
@@ -20,19 +29,10 @@ android {
         }
     }
 
-    signingConfigs {
-        create("release") {
-            storeFile = rootProject.file("release.jks")
-            storePassword = "rainy2fa"
-            keyAlias = "rainy2fa"
-            keyPassword = "rainy2fa"
-        }
-    }
-
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
-            isDebuggable = true
+            isJniDebuggable = true
         }
         release {
             signingConfig = signingConfigs.getByName("release")
@@ -46,31 +46,41 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // minSdk=24 需要 desugaring 来支持 java.time API
+        isCoreLibraryDesugaringEnabled = true
     }
     buildFeatures {
         compose = true
-    }
-    lint {
-        abortOnError = false
-        checkReleaseBuilds = false
     }
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        // ★ Proot 环境下 AGP strip 工具链不兼容，禁止 strip native 库
+        jniLibs {
+            keepDebugSymbols.add("**/*.so")
+        }
+    }
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
     }
 }
 
-// Force use of ARM64 binaries for AAPT2 in Proot environment
-configurations.all {
-    resolutionStrategy.eachDependency {
-        if (requested.group == "com.android.tools.build" && requested.name == "aapt2") {
-            useTarget("com.android.tools.build:aapt2:${requested.version}:linux-aarch64")
+// Force use of ARM64 binaries for AAPT2 in Proot environment (only on aarch64)
+if (System.getProperty("os.arch") == "aarch64") {
+    configurations.all {
+        resolutionStrategy.eachDependency {
+            if (requested.group == "com.android.tools.build" && requested.name == "aapt2") {
+                useTarget("com.android.tools.build:aapt2:${requested.version}:linux-aarch64")
+            }
         }
     }
 }
 
 dependencies {
+    // Desugaring (for java.time on API < 26)
+    coreLibraryDesugaring(libs.desugar.jdk.libs)
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)

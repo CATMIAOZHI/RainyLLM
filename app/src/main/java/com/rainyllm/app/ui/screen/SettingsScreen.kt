@@ -133,7 +133,7 @@ fun SettingsScreen() {
 
         // 模型设置
         SettingsSection("🧠 模型设置") {
-            // 推理后端（草稿模式：点击只改本地状态）
+            // 推理后端
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),

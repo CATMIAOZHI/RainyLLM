@@ -12,31 +12,45 @@ class ModelRepository(private val modelsDir: File) {
     companion object {
         private const val TAG = "ModelRepository"
         private const val EXT_LITERTLM = ".litertlm"
+
+        /** 标准化名称：移除连字符、下划线、空格，统一小写，用于模糊匹配 */
+        fun normalizeName(name: String): String =
+            name.replace('-', ' ').replace('_', ' ')
+               .replace(Regex("\\s+"), " ").trim().lowercase()
     }
 
     /**
      * 扫描已下载的模型列表
+     * 匹配规则：精确匹配预设ID 或 标准化精确匹配，都不匹配则视为自定义模型
      */
     fun scanDownloadedModels(): List<DownloadedModel> {
         if (!modelsDir.exists()) return emptyList()
 
         return modelsDir.listFiles()
             ?.filter { it.isFile && it.name.endsWith(EXT_LITERTLM) }
-            ?.mapNotNull { file ->
+            ?.map { file ->
                 val nameNoExt = file.nameWithoutExtension
-                // 优先精确匹配预设模型
-                val matchingPreset = ModelInfo.PRESET_MODELS.find { preset ->
+
+                // 精确匹配（文件名与预设ID完全一致）
+                val exactMatch = ModelInfo.PRESET_MODELS.find { preset ->
                     nameNoExt.equals(preset.id, ignoreCase = true)
                 }
-                ?: // 若无精确匹配，检查是否以预设id开头（允许改名变体如 gemma4-e2b-v2）
-                ModelInfo.PRESET_MODELS.find { preset ->
-                    nameNoExt.startsWith(preset.id, ignoreCase = true) &&
-                        (nameNoExt.length == preset.id.length ||
-                         nameNoExt[preset.id.length] in setOf('-', '_', ' ', '.'))
-                }
+                if (exactMatch != null) return@map DownloadedModel(
+                    modelInfo = exactMatch, file = file, isDownloaded = true
+                )
 
+                // 标准化精确匹配（处理连字符/下划线差异，如 gemma-4-E2B-it ↔ gemma4-e2b）
+                val normalized = normalizeName(nameNoExt)
+                val fuzzyMatch = ModelInfo.PRESET_MODELS.find { preset ->
+                    normalizeName(preset.id) == normalized
+                }
+                if (fuzzyMatch != null) return@map DownloadedModel(
+                    modelInfo = fuzzyMatch, file = file, isDownloaded = true
+                )
+
+                // 不匹配任何预设 → 视为自定义模型
                 DownloadedModel(
-                    modelInfo = matchingPreset ?: ModelInfo(
+                    modelInfo = ModelInfo(
                         id = nameNoExt,
                         name = nameNoExt,
                         sizeBytes = file.length(),
@@ -52,20 +66,23 @@ class ModelRepository(private val modelsDir: File) {
 
     /**
      * 智能查找模型文件
-     * 优先精确匹配 modelId.litertlm，若无则扫描目录找以 modelId 开头的文件
+     * 匹配策略与 scanDownloadedModels 一致：精确匹配 → 标准化精确匹配
      */
     fun findModelFile(modelId: String): File? {
         val exact = getModelFile(modelId)
         if (exact.exists()) return exact
 
-        // 扫描同名但不同后缀变体的文件
-        return modelsDir.listFiles()
-            ?.find { it.isFile && it.name.endsWith(EXT_LITERTLM) &&
-                it.nameWithoutExtension.equals(modelId, ignoreCase = true) }
-            ?: // 宽松匹配：以 modelId 开头
-            modelsDir.listFiles()
-                ?.find { it.isFile && it.name.endsWith(EXT_LITERTLM) &&
-                    it.nameWithoutExtension.startsWith(modelId, ignoreCase = true) }
+        val targetNorm = normalizeName(modelId)
+        val candidates = modelsDir.listFiles()
+            ?.filter { it.isFile && it.name.endsWith(EXT_LITERTLM) }
+            ?: return null
+
+        // 精确文件名匹配
+        candidates.find { it.nameWithoutExtension.equals(modelId, ignoreCase = true) }
+            ?.let { return it }
+
+        // 标准化精确匹配（处理连字符/下划线差异）
+        return candidates.find { normalizeName(it.nameWithoutExtension) == targetNorm }
     }
 
     /**
@@ -93,12 +110,13 @@ class ModelRepository(private val modelsDir: File) {
      * 删除模型文件
      */
     fun deleteModel(modelId: String): Boolean {
-        val file = getModelFile(modelId)
-        return if (file.exists()) {
-            file.delete().also {
-                Log.i(TAG, "删除模型: $modelId — ${if (it) "成功" else "失败"}")
-            }
-        } else false
+        // 先用精确路径，再用智能查找（处理文件名变体）
+        val file = getModelFile(modelId).takeIf { it.exists() }
+            ?: findModelFile(modelId)
+            ?: return false
+        return file.delete().also {
+            Log.i(TAG, "删除模型: $modelId — ${if (it) "成功" else "失败"}")
+        }
     }
 
     /**

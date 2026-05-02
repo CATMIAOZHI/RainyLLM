@@ -29,7 +29,9 @@ class OpenAIServer(
     private val port: Int,
     private val llmEngine: LlmEngine,
     private val modelId: String = "gemma4-e2b",
-    private val defaultSamplerConfig: SamplerConfig? = null
+    private val defaultSamplerConfig: SamplerConfig? = null,
+    /** 动态读取最新 SamplerConfig 的供应商（优先于 defaultSamplerConfig） */
+    private val samplerConfigSupplier: (() -> SamplerConfig)? = null
 ) : NanoHTTPD("127.0.0.1", port) {
 
     companion object {
@@ -149,7 +151,7 @@ class OpenAIServer(
     }
 
     private fun handleListModels(): Response {
-        val data = """{"object":"list","data":[{"id":"$modelId","object":"model","owned_by":"rainyllm"}]}"""
+        val data = """{"object":"list","data":[{"id":"$modelId","object":"model","owned_by":"rainyllm"},{"id":"yuqing","object":"model","owned_by":"rainyllm"}]}"""
         return jsonResponse(Response.Status.OK, data)
     }
 
@@ -164,6 +166,13 @@ class OpenAIServer(
 
         val request = RequestParser.parseChatCompletionRequest(bodyJson)
         val isStream = request["stream"] as? Boolean ?: false
+
+        // 提取请求中的模型名（yuqing 别名直接映射为当前模型，响应沿用请求名）
+        val requestModel = (request["model"] as? String)?.takeUnless { it.isBlank() }
+        val responseModel = requestModel ?: modelId
+
+        // ★ 从请求中提取推理参数，若客户端传了则覆盖默认值
+        val requestSamplerConfig = buildRequestSamplerConfig(request)
 
         val systemPrompt = (request["messages"] as? List<Map<String, Any>>)
             ?.firstOrNull { it["role"] == "system" }
@@ -238,22 +247,45 @@ class OpenAIServer(
             }
 
         return if (isStream) {
-            handleStreamResponse(prompt, systemPrompt, promptTokens, multimodalContents)
+            handleStreamResponse(prompt, systemPrompt, promptTokens, multimodalContents, responseModel, requestSamplerConfig)
         } else {
-            handleSyncResponse(prompt, systemPrompt, promptTokens, multimodalContents)
+            handleSyncResponse(prompt, systemPrompt, promptTokens, multimodalContents, responseModel, requestSamplerConfig)
         }
+    }
+
+    /**
+     * 从请求参数构建 SamplerConfig，若客户端传了 temperature/top_p 则覆盖默认值。
+     * 返回 null 表示客户端未传任何参数，使用当前动态配置。
+     */
+    private fun buildRequestSamplerConfig(request: Map<String, Any>): SamplerConfig? {
+        val hasTemp = request.containsKey("temperature")
+        val hasTopP = request.containsKey("top_p")
+        if (!hasTemp && !hasTopP) return null
+
+        val base = samplerConfigSupplier?.invoke() ?: defaultSamplerConfig
+            ?: SamplerConfig(temperature = 0.7, topK = 40, topP = 0.95)
+        return SamplerConfig(
+            temperature = if (hasTemp) (request["temperature"] as? Number)?.toDouble() ?: base.temperature
+                          else base.temperature,
+            topK = base.topK,
+            topP = if (hasTopP) (request["top_p"] as? Number)?.toDouble() ?: base.topP
+                      else base.topP
+        )
     }
 
 private fun handleSyncResponse(
         prompt: String,
         systemPrompt: String?,
         promptTokens: Int,
-        multimodalContents: List<Content>
+        multimodalContents: List<Content>,
+        responseModel: String = modelId,
+        requestSamplerConfig: SamplerConfig? = null
     ): Response {
         return try {
+            val sampler = requestSamplerConfig ?: samplerConfigSupplier?.invoke() ?: defaultSamplerConfig
             val config = ConversationConfig(
                 systemInstruction = if (systemPrompt != null) Contents.of(systemPrompt) else null,
-                samplerConfig = defaultSamplerConfig
+                samplerConfig = sampler
             )
             val isMultimodal = multimodalContents.size > 1
             val result: String
@@ -290,7 +322,7 @@ private fun handleSyncResponse(
 
             val responseJson = buildChatResponseJson(
                 content = result,
-                model = modelId,
+                model = responseModel,
                 promptTokens = finalPromptTokens,
                 completionTokens = finalCompletionTokens
             )
@@ -313,11 +345,14 @@ private fun handleSyncResponse(
         prompt: String,
         systemPrompt: String?,
         promptTokens: Int,
-        multimodalContents: List<Content>
+        multimodalContents: List<Content>,
+        responseModel: String = modelId,
+        requestSamplerConfig: SamplerConfig? = null
     ): Response {
+        val sampler = requestSamplerConfig ?: samplerConfigSupplier?.invoke() ?: defaultSamplerConfig
         val config = ConversationConfig(
             systemInstruction = if (systemPrompt != null) Contents.of(systemPrompt) else null,
-            samplerConfig = defaultSamplerConfig
+            samplerConfig = sampler
         )
         val conversation = llmEngine.createConversation(config)
         val isMultimodal = multimodalContents.size > 1
@@ -348,7 +383,7 @@ private fun handleSyncResponse(
                     val created = Instant.now().epochSecond
 
                     writeChunk(outputStream,
-                        SseFormatter.buildSseChunk(id, modelId, created, "assistant", null))
+                        SseFormatter.buildSseChunk(id, responseModel, created, "assistant", null))
 
                     var totalTokens = 0
                     runBlocking(Dispatchers.IO) {
@@ -360,7 +395,7 @@ private fun handleSyncResponse(
                         flow.collect { token ->
                             totalTokens++
                             writeChunk(outputStream,
-                                SseFormatter.buildSseChunk(id, modelId, created, null, token))
+                                SseFormatter.buildSseChunk(id, responseModel, created, null, token))
                         }
                     }
 
@@ -372,7 +407,7 @@ private fun handleSyncResponse(
 
                     // 最后 chunk：done
                     writeChunk(outputStream,
-                        SseFormatter.buildSseDone(id, modelId, created, finalPromptTokens, finalCompletionTokens))
+                        SseFormatter.buildSseDone(id, responseModel, created, finalPromptTokens, finalCompletionTokens))
                     writeFinalChunk(outputStream)
 
                     stats.addRequest(finalPromptTokens, finalCompletionTokens)

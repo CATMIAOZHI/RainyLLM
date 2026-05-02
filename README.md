@@ -30,6 +30,17 @@
 
 > ⚠️ 模型文件需在 App 内单独下载（Gemma4-E2B 约 2.58GB），不包含在 APK 中。
 
+### 🧠 推荐模型
+
+| 模型 | 大小 | 类型 | 仓库 |
+|------|------|------|------|
+| **Gemma 4 E2B** | ~2.58 GB | 官方指令版 | [litert-community](https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm) |
+| **Gemma 4 E4B** | ~3.65 GB | 官方指令版 | [litert-community](https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm) |
+| 🔥 **Gemma 4 E2B (无限制)** | ~2.58 GB | 未审查 ablirated | [nqd145](https://huggingface.co/nqd145/Gemma-4-E2B-it-abliterated-litertlm) |
+| 🔥 **Gemma 4 E4B (无限制)** | ~3.65 GB | 未审查 ablirated | [typomonster](https://huggingface.co/typomonster/supergemma4-e4b-abliterated-litert-lm) |
+
+> 🔥 未审查版本通过 **abliteration** 移除了模型的拒绝回答倾向，适合角色扮演等不受限场景。使用时请遵守相关法律法规。
+
 ---
 
 ## 🏗️ 技术架构

@@ -226,7 +226,16 @@
 - [x] 7.4.1 配置 ProGuard/R8 混淆规则（保护 LiteRT-LM 的 JNI 类不被混淆） <!-- 完成日期 2026-04-29 06:18 -->
 - [x] 7.4.2 更新 `build.gradle.kts`：versionCode = 1, versionName = "1.0.0" <!-- 完成日期 2026-04-29 06:01 -->
 - [x] 7.4.3 在 `AndroidManifest.xml` 设置 `android:allowBackup="false"`（隐私安全） <!-- 完成日期 2026-04-29 06:18 -->
-- [ ] 7.4.4 验证：执行 `./gradlew assembleDebug` 构建 Debug APK
+- [x] 7.4.4 验证：执行 `./gradlew assembleDebug` 构建 Debug APK <!-- 完成日期 2026-05-02 06:10 -->
+
+### 🐛 回合修复：启动服务 & 引擎初始化
+
+| # | 问题 | 根因 | 修复方式 |
+|---|------|------|----------|
+| ~~1~~ | ~~`kotlin-android` 插件缺失~~ | ❌ 误判：Kotlin 2.3.10 中 `kotlin-compose` 已自动包含 `kotlin-android`，显式声明会冲突 | 撤销修改，保持原样 |
+| 2 | 引擎初始化失败后 Service 僵尸化 | `LlmServerService.kt` catch 块只记录日志，未 `stopSelf()` | 失败时调用 `stopAll()` + `stopSelf()` |
+| 3 | UI 无错误反馈 | `DashboardScreen` 轮询 `OpenAIServer.currentInstance`，引擎失败时 instance 为 null，UI 只看得到"未启动" | 添加 `LlmServerService.lastInitError` 静态字段 + UI 错误卡片 |
+| 4 | `modelsDir` 使用外部存储可能不可用 | `RainyLLMApp.modelsDir` 优先使用 `getExternalFilesDir`，在某些设备上可能返回 null 或不可写 | 已回退到 `filesDir`（已有逻辑），无代码变更 |
 
 ---
 

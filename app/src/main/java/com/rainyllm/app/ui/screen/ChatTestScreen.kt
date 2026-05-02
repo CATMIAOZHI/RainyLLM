@@ -1,6 +1,7 @@
 package com.rainyllm.app.ui.screen
 
 import android.net.Uri
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -86,6 +87,7 @@ fun ChatTestScreen(
 ) {
     val context = LocalContext.current
     val prefs = remember { AppPreferences(context) }
+    val scope = rememberCoroutineScope()
 
     var engine by remember { mutableStateOf<LlmEngine?>(null) }
     var isInitializing by remember { mutableStateOf(false) }
@@ -97,7 +99,19 @@ fun ChatTestScreen(
     // 读取设置中的 KV Cache 容量
     var maxTokens by remember { mutableIntStateOf(4096) }
     LaunchedEffect(Unit) {
-        prefs.maxTokens.collect { maxTokens = it }
+        prefs.maxTokens.collect { newMax ->
+            if (newMax != maxTokens) {
+                maxTokens = newMax
+                // maxTokens 变化时，若引擎已加载则触发重建（KV Cache 在引擎初始化时固定）
+                if (engineKey >= 0) engineKey++
+            }
+        }
+    }
+
+    // 从设置读取推理后端
+    var backend by remember { mutableStateOf("cpu") }
+    LaunchedEffect(Unit) {
+        prefs.backend.collect { backend = it }
     }
 
     LaunchedEffect(Unit) {
@@ -110,44 +124,78 @@ fun ChatTestScreen(
         }
     }
 
-    val effectiveModelPath = modelPath.ifEmpty {
-        val repo = ModelRepository(RainyLLMApp.instance.modelsDir)
-        repo.findModelFile(selectedModel)?.absolutePath
-            ?: "${RainyLLMApp.instance.modelsDir}/${selectedModel}.litertlm"
+    val effectiveModelPath = try {
+        modelPath.ifEmpty {
+            val repo = ModelRepository(RainyLLMApp.instance.modelsDir)
+            // 第 1 层：精确查找
+            repo.findModelFile(selectedModel)?.absolutePath
+            // 第 2 层：回退到 ID 直接拼接
+            ?: run {
+                val fallbackPath = "${RainyLLMApp.instance.modelsDir}/${selectedModel}.litertlm"
+                if (java.io.File(fallbackPath).exists()) fallbackPath else null
+            }
+            // 第 3 层：扫描目录中任意已下载的模型
+            ?: repo.scanDownloadedModels().firstOrNull()?.let {
+                Log.w("ChatTestScreen", "未找到模型 $selectedModel，回退到第一个已下载模型: ${it.modelInfo.id}")
+                if (it.modelInfo.id != selectedModel) {
+                    selectedModel = it.modelInfo.id
+                    scope.launch { prefs.setSelectedModel(it.modelInfo.id) }
+                }
+                it.file.absolutePath
+            }
+            // 第 4 层：最后的 fallback
+            ?: "${RainyLLMApp.instance.modelsDir}/gemma4-e2b.litertlm"
+        }
+    } catch (e: Exception) {
+        Log.e("ChatTestScreen", "模型路径计算失败: ${e.message}", e)
+        initError = "应用初始化中，请稍后重试喵~\n${e.message}"
+        ""
     }
     val effectiveCacheDir = cacheDir.ifEmpty { context.cacheDir.path }
 
     // engineKey 变化时：关闭旧引擎 → 加载新引擎（engineKey <0 时不执行）
     DisposableEffect(engineKey) {
         if (engineKey >= 0) {
-            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            isInitializing = true
-            initError = null
-            engine = null
-            scope.launch {
-                try {
-                    @OptIn(com.google.ai.edge.litertlm.ExperimentalApi::class)
-                    com.google.ai.edge.litertlm.ExperimentalFlags.enableBenchmark = true
-
-                    val newEngine = LlmEngine(
-                        effectiveModelPath, effectiveCacheDir,
-                        visionBackend = com.google.ai.edge.litertlm.Backend.GPU(),
-                        audioBackend = com.google.ai.edge.litertlm.Backend.CPU(),
-                        maxNumTokens = maxTokens
-                    )
-                    newEngine.initialize()
-                    engine = newEngine
-                } catch (e: Exception) {
-                    initError = if (e is com.rainyllm.app.engine.EngineInitException)
-                        e.message else "初始化失败: ${e.localizedMessage}"
-                } finally {
-                    isInitializing = false
-                }
-            }
-            onDispose {
-                scope.cancel()
-                engine?.close()
+            val modelFile = java.io.File(effectiveModelPath)
+            if (!modelFile.exists()) {
+                initError = "模型文件不存在喵~ 😿\n${effectiveModelPath}"
+                isInitializing = false
+                onDispose { }
+            } else {
+                val initScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+                isInitializing = true
+                initError = null
                 engine = null
+                initScope.launch {
+                    try {
+                        @OptIn(com.google.ai.edge.litertlm.ExperimentalApi::class)
+                        com.google.ai.edge.litertlm.ExperimentalFlags.enableBenchmark = true
+
+                        // 使用用户设置的后端
+                        val engineBackend = when (backend.lowercase()) {
+                            "gpu" -> com.google.ai.edge.litertlm.Backend.GPU()
+                            else -> com.google.ai.edge.litertlm.Backend.CPU()
+                        }
+                        val newEngine = LlmEngine(
+                            effectiveModelPath, effectiveCacheDir,
+                            visionBackend = com.google.ai.edge.litertlm.Backend.CPU(),
+                            audioBackend = com.google.ai.edge.litertlm.Backend.CPU(),
+                            maxNumTokens = maxTokens
+                        )
+                        newEngine.initialize(backend = engineBackend)
+                        engine = newEngine
+                    } catch (e: Exception) {
+                        initError = if (e is com.rainyllm.app.engine.EngineInitException)
+                            e.message else "初始化失败: ${e.localizedMessage}"
+                    } finally {
+                        isInitializing = false
+                    }
+                }
+                onDispose {
+                    initScope.cancel()
+                    engine?.close()
+                    engine = null
+                }
             }
         } else {
             onDispose { }
@@ -300,9 +348,9 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
     // 历史消息预填充（加载历史时设置，用于恢复 KV-Cache 上下文）
     var historyInitMessages by remember { mutableStateOf<List<com.google.ai.edge.litertlm.Message>>(emptyList()) }
 
-    // key(systemPrompt) 驱动 DisposableEffect：提示词变化时旧的 close、新的创建
+    // key(systemPrompt + 推理参数) 驱动 DisposableEffect：任何变化时重建 Conversation
     var conversation by remember { mutableStateOf<com.google.ai.edge.litertlm.Conversation?>(null) }
-    DisposableEffect(systemPrompt, historyInitMessages) {
+    DisposableEffect(systemPrompt, historyInitMessages, temperature, topK, topP) {
         val samplerConfig = SamplerConfig(
             temperature = temperature.toDouble(),
             topK = topK,
