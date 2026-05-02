@@ -47,11 +47,11 @@ private val paramDocs = mapOf(
         "从累积概率达到 P 的最小词集合中采样。与 Top-K 互补，动态调整候选词数量。\n0.0 = 极度保守\n1.0 = 考虑所有词",
         "推荐：0.95（默认）| 0.5（精确任务）"
     ),
-    "maxTokens" to ParamInfo(
-        "最大输出 Token",
-        "单次回复最多生成多少个 token。中文约 1.5 字/token，英文约 0.75 词/token。\n值越大回答越长，但也会增加推理时间。",
-        "推荐：2048–4096（日常对话）| 8192+（长文）"
-    )
+"maxTokens" to ParamInfo(
+            "最大 Token（KV Cache）",
+            "控制引擎的 KV Cache 总容量（输入+输出共享）。\n\n值越大能处理更长对话，但消耗更多内存。当前设置已写入引擎配置，修改后需重新初始化模型生效。",
+            "推荐：4096（日常）| 8192（长对话）| 16384（长文档）"
+        ),
 )
 
 @OptIn(ExperimentalMaterial3Api::class)

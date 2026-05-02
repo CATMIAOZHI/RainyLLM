@@ -16,7 +16,9 @@ class LlmEngine(
     private val modelPath: String,
     private val cacheDir: String,
     private val visionBackend: Backend? = null,
-    private val audioBackend: Backend? = null
+    private val audioBackend: Backend? = null,
+    /** KV Cache 最大 token 容量，null 则使用模型默认值 */
+    val maxNumTokens: Int? = 4096
 ) {
 
     companion object {
@@ -39,7 +41,8 @@ class LlmEngine(
                     backend = backend,
                     cacheDir = cacheDir,
                     visionBackend = visionBackend,
-                    audioBackend = audioBackend
+                    audioBackend = audioBackend,
+                    maxNumTokens = maxNumTokens
                 )
                 engine = Engine(config).also { it.initialize() }
                 Log.i(TAG, "引擎初始化成功 ✓")

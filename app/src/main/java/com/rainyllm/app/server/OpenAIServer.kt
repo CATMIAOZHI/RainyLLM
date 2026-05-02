@@ -2,9 +2,10 @@ package com.rainyllm.app.server
 
 import android.util.Base64
 import android.util.Log
-import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.ConversationConfig
+import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.rainyllm.app.engine.LlmEngine
 import com.rainyllm.app.engine.TokenEstimator
@@ -229,7 +230,12 @@ class OpenAIServer(
                 prompt = contentField?.toString() ?: ""
             }
         }
-        val promptTokens = TokenEstimator.estimatePromptTokens(prompt)
+        val promptTokens = if (multimodalContents.size > 1) {
+                val counts = TokenEstimator.countMultimodal(multimodalContents)
+                TokenEstimator.estimateMultimodalPromptTokens(prompt, counts)
+            } else {
+                TokenEstimator.estimatePromptTokens(prompt)
+            }
 
         return if (isStream) {
             handleStreamResponse(prompt, systemPrompt, promptTokens, multimodalContents)
@@ -238,7 +244,7 @@ class OpenAIServer(
         }
     }
 
-    private fun handleSyncResponse(
+private fun handleSyncResponse(
         prompt: String,
         systemPrompt: String?,
         promptTokens: Int,
@@ -249,27 +255,47 @@ class OpenAIServer(
                 systemInstruction = if (systemPrompt != null) Contents.of(systemPrompt) else null,
                 samplerConfig = defaultSamplerConfig
             )
-            val result = runBlocking(Dispatchers.IO) {
+            val isMultimodal = multimodalContents.size > 1
+            val result: String
+            val actualPromptTokens: Int
+            val actualCompletionTokens: Int
+
+            runBlocking(Dispatchers.IO) {
                 llmEngine.createConversation(config).use { conversation ->
-                    val responseMsg = if (multimodalContents.size > 1) {
-                        // 多模态：Contents.of(Content.ImageBytes(...), Content.Text(...), ...)
+                    val responseMsg = if (isMultimodal) {
                         conversation.sendMessage(Contents.of(multimodalContents))
                     } else {
                         conversation.sendMessage(prompt)
                     }
-                    responseMsg.toString()
+                    result = responseMsg.toString()
+
+                    // 尝试从引擎获取真实 token 计数（需要 benchmark 模式启用）
+                    actualPromptTokens = getBenchmarkTokenCount(conversation) { it.lastPrefillTokenCount }
+                    actualCompletionTokens = getBenchmarkTokenCount(conversation) { it.lastDecodeTokenCount }
                 }
             }
-            val completionTokens = TokenEstimator.estimateCompletionTokens(result)
+
+            // 若 benchmark 不可用，回退到估算
+            val finalPromptTokens = if (actualPromptTokens > 0)
+                actualPromptTokens
+            else if (isMultimodal) {
+                val counts = TokenEstimator.countMultimodal(multimodalContents)
+                TokenEstimator.estimateMultimodalPromptTokens(prompt, counts)
+            } else promptTokens
+
+            val finalCompletionTokens = if (actualCompletionTokens > 0)
+                actualCompletionTokens
+            else
+                TokenEstimator.estimateCompletionTokens(result)
 
             val responseJson = buildChatResponseJson(
                 content = result,
                 model = modelId,
-                promptTokens = promptTokens,
-                completionTokens = completionTokens
+                promptTokens = finalPromptTokens,
+                completionTokens = finalCompletionTokens
             )
 
-            stats.addRequest(promptTokens, completionTokens)
+            stats.addRequest(finalPromptTokens, finalCompletionTokens)
             pendingResponseSummary = responseJson.take(500)
             jsonResponse(Response.Status.OK, responseJson)
         } catch (e: Exception) {
@@ -281,7 +307,7 @@ class OpenAIServer(
             jsonResponse(Response.Status.INTERNAL_ERROR,
                 """{"error":{"message":"Inference failed: ${e.message?.replace("\"", "\\\"")}"}}""")
         }
-}
+    }
 
     private fun handleStreamResponse(
         prompt: String,
@@ -338,16 +364,22 @@ class OpenAIServer(
                         }
                     }
 
+                    // 尝试从引擎获取真实 token 计数
+                    val actualDecode = getBenchmarkTokenCount(conversation) { it.lastDecodeTokenCount }
+                    val actualPrefill = getBenchmarkTokenCount(conversation) { it.lastPrefillTokenCount }
+                    val finalCompletionTokens = if (actualDecode > 0) actualDecode else totalTokens
+                    val finalPromptTokens = if (actualPrefill > 0) actualPrefill else promptTokens
+
                     // 最后 chunk：done
                     writeChunk(outputStream,
-                        SseFormatter.buildSseDone(id, modelId, created, promptTokens, totalTokens))
+                        SseFormatter.buildSseDone(id, modelId, created, finalPromptTokens, finalCompletionTokens))
                     writeFinalChunk(outputStream)
 
-                    stats.addRequest(promptTokens, totalTokens)
+                    stats.addRequest(finalPromptTokens, finalCompletionTokens)
                     val elapsed = System.currentTimeMillis() - streamStart
                     if (sseLogIndex >= 0) {
                         setLogEntryAt(sseLogIndex,
-                            "SSE 流式输出 · ${totalTokens} tokens", elapsed)
+                            "SSE 流式输出 · ${finalCompletionTokens} tokens", elapsed)
                     }
                 } catch (e: IOException) {
                     Log.d(TAG, "SSE 客户端断开连接")
@@ -556,6 +588,22 @@ class OpenAIServer(
         requestLog.add(entry)
         if (requestLog.size > 200) requestLog.removeAt(0)
         return nextLogIndex.getAndIncrement()
+    }
+
+    /**
+     * 安全获取 benchmark token 计数（需要 @OptIn ExperimentalApi）
+     * 若 benchmark 未启用或调用失败则返回 0，调用方回退到估算。
+     */
+    @OptIn(ExperimentalApi::class)
+    private fun getBenchmarkTokenCount(
+        conversation: com.google.ai.edge.litertlm.Conversation,
+        extract: (com.google.ai.edge.litertlm.BenchmarkInfo) -> Int
+    ): Int {
+        return try {
+            extract(conversation.getBenchmarkInfo())
+        } catch (_: Exception) {
+            0
+        }
     }
 
     /**

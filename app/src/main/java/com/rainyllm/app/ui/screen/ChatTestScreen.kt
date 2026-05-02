@@ -34,6 +34,7 @@ import coil.compose.rememberAsyncImagePainter
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.rainyllm.app.RainyLLMApp
 import com.rainyllm.app.data.AppPreferences
@@ -50,7 +51,21 @@ data class ChatMessage(
     val content: String,
     val isStreaming: Boolean = false,
     val imageUri: Uri? = null,
-    val audioUri: Uri? = null
+    val audioUri: Uri? = null,
+    /** 输出 token 数（模型消息），或 prompt token 数（用户消息，已废弃不再展示） */
+    val tokenCount: Int? = null,
+    /** 输入 prompt token 数（仅模型消息） */
+    val promptTokens: Int? = null,
+    /** KV Cache 已用 token 数（仅模型消息） */
+    val kvCacheTokens: Int? = null,
+    /** KV Cache 最大容量（仅模型消息） */
+    val kvCacheMax: Int? = null,
+    /** 推理耗时（毫秒），流式中为实时计时器值 */
+    val elapsedMs: Long? = null,
+    /** 首 token 延迟（毫秒），仅模型消息 */
+    val ttftMs: Long? = null,
+    /** 每秒生成 token 数，仅模型消息 */
+    val tokensPerSec: Float? = null
 )
 
 enum class Role { USER, MODEL }
@@ -79,6 +94,12 @@ fun ChatTestScreen(
     // engineKey >= 0 时自动加载/重建引擎；-1 表示等待用户手动触发
     var engineKey by remember { mutableIntStateOf(-1) }
 
+    // 读取设置中的 KV Cache 容量
+    var maxTokens by remember { mutableIntStateOf(4096) }
+    LaunchedEffect(Unit) {
+        prefs.maxTokens.collect { maxTokens = it }
+    }
+
     LaunchedEffect(Unit) {
         prefs.selectedModel.collect { newModel ->
             if (newModel != selectedModel) {
@@ -105,10 +126,14 @@ fun ChatTestScreen(
             engine = null
             scope.launch {
                 try {
+                    @OptIn(com.google.ai.edge.litertlm.ExperimentalApi::class)
+                    com.google.ai.edge.litertlm.ExperimentalFlags.enableBenchmark = true
+
                     val newEngine = LlmEngine(
                         effectiveModelPath, effectiveCacheDir,
                         visionBackend = com.google.ai.edge.litertlm.Backend.GPU(),
-                        audioBackend = com.google.ai.edge.litertlm.Backend.CPU()
+                        audioBackend = com.google.ai.edge.litertlm.Backend.CPU(),
+                        maxNumTokens = maxTokens
                     )
                     newEngine.initialize()
                     engine = newEngine
@@ -254,10 +279,12 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
     var temperature by remember { mutableFloatStateOf(0.7f) }
     var topK by remember { mutableIntStateOf(40) }
     var topP by remember { mutableFloatStateOf(0.95f) }
+    var maxTokens by remember { mutableIntStateOf(4096) }
     LaunchedEffect(Unit) {
         launch { prefs.temperature.collect { temperature = it } }
         launch { prefs.topK.collect { topK = it } }
         launch { prefs.topP.collect { topP = it } }
+        launch { prefs.maxTokens.collect { maxTokens = it } }
     }
 
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -267,9 +294,15 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
         if (uri != null) audioUri = uri
     }
 
+    // 累积上下文 token 计数器（每次新对话归零）
+    var cumulativeContextTokens by remember { mutableLongStateOf(0L) }
+
+    // 历史消息预填充（加载历史时设置，用于恢复 KV-Cache 上下文）
+    var historyInitMessages by remember { mutableStateOf<List<com.google.ai.edge.litertlm.Message>>(emptyList()) }
+
     // key(systemPrompt) 驱动 DisposableEffect：提示词变化时旧的 close、新的创建
     var conversation by remember { mutableStateOf<com.google.ai.edge.litertlm.Conversation?>(null) }
-    DisposableEffect(systemPrompt) {
+    DisposableEffect(systemPrompt, historyInitMessages) {
         val samplerConfig = SamplerConfig(
             temperature = temperature.toDouble(),
             topK = topK,
@@ -277,7 +310,8 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
         )
         val config = ConversationConfig(
             systemInstruction = if (systemPrompt.isNotBlank()) Contents.of(systemPrompt) else null,
-            samplerConfig = samplerConfig
+            samplerConfig = samplerConfig,
+            initialMessages = historyInitMessages
         )
         val newConv = engine.createConversation(config)
         conversation = newConv
@@ -317,6 +351,13 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
                 messages.clear()
                 messages.addAll(record.messages)
                 systemPrompt = record.systemPrompt
+                // 将历史消息转为 LiteRT-LM Message，预填充到新 Conversation 的 KV-Cache
+                historyInitMessages = record.messages.mapNotNull { msg ->
+                    when (msg.role) {
+                        Role.USER -> com.google.ai.edge.litertlm.Message.user(msg.content)
+                        Role.MODEL -> com.google.ai.edge.litertlm.Message.model(msg.content)
+                    }
+                }
                 scope.launch { prefs.setSystemPrompt(systemPrompt) }
                 showHistory = false
             },
@@ -353,6 +394,8 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
                 IconButton(onClick = {
                     saveCurrentConversation(messages, systemPrompt, historyMap, currentConversationId)
                     messages.clear()
+                    cumulativeContextTokens = 0L
+                    historyInitMessages = emptyList()
                     currentConversationId = System.currentTimeMillis()
                 }, modifier = Modifier.size(28.dp)) {
                     Icon(Icons.Default.Add, contentDescription = "新对话", modifier = Modifier.size(14.dp))
@@ -436,8 +479,9 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
                         isStreaming = true
                     )
                     messages.add(userMsg)
-                    val modelIdx = messages.size
                     messages.add(modelMsg)
+                    val userIdx = messages.size - 2
+                    val modelIdx = messages.size - 1
                     val currentInput = inputText.trim()
                     val currentImage = imageUri
                     val currentAudio = audioUri
@@ -446,8 +490,23 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
                     audioUri = null
                     isGenerating = true
 
+                    // maxNumTokens 从 LlmEngine 获取 KV Cache 容量
+                    val kvCacheMax = engine.maxNumTokens
+
                     scope.launch {
                         var fullResponse = ""
+                        val inferenceStart = System.currentTimeMillis()
+                        var firstTokenTime: Long? = null
+                        // 独立计时器：不依赖 token 到达，每 80ms 刷新一次
+                        val timerJob = scope.launch {
+                            while (isActive) {
+                                delay(80)
+                                val e = System.currentTimeMillis() - inferenceStart
+                                if (messages.size > userIdx) {
+                                    messages[userIdx] = messages[userIdx].copy(elapsedMs = e)
+                                }
+                            }
+                        }
                         try {
                             val flow = if (currentImage != null || currentAudio != null) {
                                 val contents = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -458,21 +517,63 @@ private fun ChatContent(engine: LlmEngine, modelId: String, onUnload: () -> Unit
                                 engine.generateResponseAsync(conv, currentInput)
                             }
                             flow.collect { token ->
+                                if (firstTokenTime == null) firstTokenTime = System.currentTimeMillis()
                                 fullResponse += token
                                 messages[modelIdx] = messages[modelIdx].copy(content = fullResponse)
                             }
-                            messages[modelIdx] = messages[modelIdx].copy(isStreaming = false)
+                            timerJob.cancel()
+                            val inferenceEnd = System.currentTimeMillis()
+                            val elapsed = inferenceEnd - inferenceStart
+                            val ttft = (firstTokenTime ?: inferenceEnd) - inferenceStart
+
+                            // 从引擎获取本轮真实 token 消耗
+                            val benchmark = try {
+                                @OptIn(com.google.ai.edge.litertlm.ExperimentalApi::class)
+                                conv.getBenchmarkInfo()
+                            } catch (_: Exception) { null }
+                            val promptTokens = benchmark?.lastPrefillTokenCount ?: 0
+                            val decodeTokens = benchmark?.lastDecodeTokenCount ?: 0
+                            val engineTps = benchmark?.lastDecodeTokensPerSecond
+
+                            // 累积上下文 = KV Cache 实际使用量
+                            val totalContext = cumulativeContextTokens + promptTokens
+
+                            // 模型消息 = 完整统计
+                            val finalDecode = if (decodeTokens > 0) decodeTokens
+                                else com.rainyllm.app.engine.TokenEstimator.estimateCompletionTokens(fullResponse)
+                            val tps = engineTps?.toFloat()
+                                ?: if (elapsed > 0) (finalDecode * 1000f / elapsed) else 0f
+                            messages[modelIdx] = messages[modelIdx].copy(
+                                content = fullResponse,
+                                isStreaming = false,
+                                tokenCount = finalDecode,
+                                promptTokens = if (promptTokens > 0) promptTokens else null,
+                                kvCacheTokens = totalContext.toInt(),
+                                kvCacheMax = kvCacheMax,
+                                elapsedMs = elapsed,
+                                ttftMs = ttft,
+                                tokensPerSec = tps
+                            )
+                            // 清除用户消息的实时计时器
+                            messages[userIdx] = messages[userIdx].copy(elapsedMs = null)
+                            // 累加本轮消耗到上下文计数器
+                            cumulativeContextTokens += promptTokens + decodeTokens
                         } catch (e: InferenceException) {
+                            timerJob.cancel()
+                            messages[userIdx] = messages[userIdx].copy(elapsedMs = null)
                             messages[modelIdx] = messages[modelIdx].copy(
                                 content = fullResponse + "\n\n⚠️ 推理错误: ${e.message}",
                                 isStreaming = false
                             )
                         } catch (e: Exception) {
+                            timerJob.cancel()
+                            messages[userIdx] = messages[userIdx].copy(elapsedMs = null)
                             messages[modelIdx] = messages[modelIdx].copy(
                                 content = fullResponse + "\n\n⚠️ 错误: ${e.localizedMessage}",
                                 isStreaming = false
                             )
                         } finally {
+                            timerJob.cancel()
                             isGenerating = false
                         }
                     }
@@ -616,7 +717,7 @@ fun MessageBubble(message: ChatMessage) {
             Spacer(Modifier.width(8.dp))
         }
 
-        Surface(shape = shape, color = bubbleColor, modifier = Modifier.widthIn(max = 280.dp)) {
+        Surface(shape = shape, color = bubbleColor, modifier = Modifier.widthIn(max = 300.dp)) {
             Column(modifier = Modifier.padding(12.dp)) {
                 // 图片缩略图
                 message.imageUri?.let {
@@ -635,10 +736,86 @@ fun MessageBubble(message: ChatMessage) {
                 if (message.content.isNotEmpty()) {
                     Text(message.content, color = contentColor, style = MaterialTheme.typography.bodyMedium)
                 }
-                if (message.isStreaming) {
+                // 用户消息 — 推理进行中的实时计时器
+                if (isUser && message.elapsedMs != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "⏱ %.1fs".format(message.elapsedMs / 1000.0),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = contentColor.copy(alpha = 0.55f)
+                    )
+                }
+                // 模型消息 — 流式输出指示
+                if (!isUser && message.isStreaming) {
                     Spacer(Modifier.height(4.dp))
                     Box(modifier = Modifier.size(8.dp).clip(CircleShape)
                         .background(contentColor.copy(alpha = 0.6f)))
+                }
+                // 模型消息 — 完成后的统计面板
+                if (!isUser && !message.isStreaming && message.tokenCount != null) {
+                    Spacer(Modifier.height(6.dp))
+                    HorizontalDivider(
+                        color = contentColor.copy(alpha = 0.15f),
+                        thickness = 0.5.dp
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    // 第一行：输入 / 输出
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        message.promptTokens?.let {
+                            Column {
+                                Text("📥 输入", style = MaterialTheme.typography.labelSmall,
+                                    color = contentColor.copy(alpha = 0.5f))
+                                Text("$it tokens", style = MaterialTheme.typography.labelSmall,
+                                    color = contentColor.copy(alpha = 0.7f))
+                            }
+                        }
+                        Column(horizontalAlignment = Alignment.End) {
+                            Text("📤 输出", style = MaterialTheme.typography.labelSmall,
+                                color = contentColor.copy(alpha = 0.5f))
+                            Text("${message.tokenCount} tokens", style = MaterialTheme.typography.labelSmall,
+                                color = contentColor.copy(alpha = 0.7f))
+                        }
+                    }
+                    // 第二行：KV Cache / 耗时 / 速度
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        // KV Cache
+                        message.kvCacheTokens?.let {
+                            val kvStr = message.kvCacheMax?.let { max ->
+                                "💾 KV: $it/$max"
+                            } ?: "💾 KV: $it"
+                            Text(kvStr, style = MaterialTheme.typography.labelSmall,
+                                color = contentColor.copy(alpha = 0.5f))
+                        }
+                        // 耗时 + TTFT
+                        Column(horizontalAlignment = Alignment.End) {
+                            message.elapsedMs?.let {
+                                Text("⏱ ${formatDuration(it)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = contentColor.copy(alpha = 0.5f))
+                            }
+                            message.ttftMs?.let {
+                                Text("⚡ TTFT ${formatDuration(it)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = contentColor.copy(alpha = 0.4f))
+                            }
+                        }
+                    }
+                    // 第三行：速度
+                    message.tokensPerSec?.let { tps ->
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            "🚀 %.1f t/s".format(tps),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = contentColor.copy(alpha = 0.45f)
+                        )
+                    }
                 }
             }
         }
@@ -872,6 +1049,13 @@ private fun saveHistory(file: java.io.File, history: Map<Long, ConversationRecor
                 m.put("content", msg.content)
                 msg.imageUri?.let { m.put("imageUri", it.toString()) }
                 msg.audioUri?.let { m.put("audioUri", it.toString()) }
+                msg.tokenCount?.let { m.put("tokenCount", it) }
+                msg.promptTokens?.let { m.put("promptTokens", it) }
+                msg.kvCacheTokens?.let { m.put("kvCacheTokens", it) }
+                msg.kvCacheMax?.let { m.put("kvCacheMax", it) }
+                msg.elapsedMs?.let { m.put("elapsedMs", it) }
+                msg.ttftMs?.let { m.put("ttftMs", it) }
+                msg.tokensPerSec?.let { m.put("tokensPerSec", it.toDouble()) }
                 msgs.put(m)
             }
             obj.put("messages", msgs)
@@ -899,7 +1083,14 @@ private fun loadHistory(file: java.io.File): Map<Long, ConversationRecord> {
                     role = Role.valueOf(m.getString("role")),
                     content = m.getString("content"),
                     imageUri = imgUri?.let { Uri.parse(it) },
-                    audioUri = audUri?.let { Uri.parse(it) }
+                    audioUri = audUri?.let { Uri.parse(it) },
+                    tokenCount = m.optInt("tokenCount", 0).takeIf { m.has("tokenCount") },
+                    promptTokens = m.optInt("promptTokens", 0).takeIf { m.has("promptTokens") },
+                    kvCacheTokens = m.optInt("kvCacheTokens", 0).takeIf { m.has("kvCacheTokens") },
+                    kvCacheMax = m.optInt("kvCacheMax", 0).takeIf { m.has("kvCacheMax") },
+                    elapsedMs = m.optLong("elapsedMs", 0).takeIf { m.has("elapsedMs") },
+                    ttftMs = m.optLong("ttftMs", 0).takeIf { m.has("ttftMs") },
+                    tokensPerSec = m.optDouble("tokensPerSec", 0.0).toFloat().takeIf { m.has("tokensPerSec") }
                 ))
             }
             val record = ConversationRecord(
@@ -912,4 +1103,10 @@ private fun loadHistory(file: java.io.File): Map<Long, ConversationRecord> {
         }
         map
     } catch (_: Exception) { emptyMap() }
+}
+
+private fun formatDuration(ms: Long): String = when {
+    ms < 1000 -> "${ms}ms"
+    ms < 60_000 -> "${"%.1f".format(ms / 1000.0)}s"
+    else -> "${ms / 60_000}m${(ms % 60_000) / 1000}s"
 }

@@ -12,6 +12,8 @@ import com.rainyllm.app.engine.LlmEngine
 import com.rainyllm.app.server.OpenAIServer
 import com.rainyllm.app.data.AppPreferences
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.ExperimentalApi
+import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.SamplerConfig
 import kotlinx.coroutines.flow.first
 
@@ -97,24 +99,28 @@ class LlmServerService : Service() {
                     acquire(10 * 60 * 1000L) // 10 分钟超时
                 }
 
-                // 初始化引擎（initialize 是 suspend 函数，需 runBlocking 桥接）
-                val engine = LlmEngine(
-                    modelPath, cacheDir,
-                    visionBackend = Backend.GPU(),
-                    audioBackend = Backend.CPU()
-                )
-                kotlinx.coroutines.runBlocking { engine.initialize() }
-                llmEngine = engine
+                // 启用 benchmark 以获取真实 token 计数
+                @OptIn(ExperimentalApi::class)
+                ExperimentalFlags.enableBenchmark = true
 
-                // 从设置读取空闲超时与推理参数
+                // 从设置读取空闲超时与推理参数（必须在引擎创建前）
                 val prefs = AppPreferences(this@LlmServerService)
                 val timeoutMin = kotlinx.coroutines.runBlocking { prefs.idleTimeoutMin.first() }
                 val timeoutMs = timeoutMin * 60 * 1000L
+                val maxTokens = kotlinx.coroutines.runBlocking { prefs.maxTokens.first() }
 
                 val samplerConfig = SamplerConfig(
                     temperature = kotlinx.coroutines.runBlocking { prefs.temperature.first() }.toDouble(),
                     topK = kotlinx.coroutines.runBlocking { prefs.topK.first() },
                     topP = kotlinx.coroutines.runBlocking { prefs.topP.first() }.toDouble()
+                )
+
+                // 初始化引擎（initialize 是 suspend 函数，需 runBlocking 桥接）
+                val engine = LlmEngine(
+                    modelPath, cacheDir,
+                    visionBackend = Backend.GPU(),
+                    audioBackend = Backend.CPU(),
+                    maxNumTokens = maxTokens
                 )
 
                 conversationPool = ConversationPool(engine, idleTimeoutMs = timeoutMs, samplerConfig = samplerConfig)
