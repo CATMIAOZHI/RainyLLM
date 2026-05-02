@@ -66,7 +66,7 @@ class ModelRepository(private val modelsDir: File) {
 
     /**
      * 智能查找模型文件
-     * 匹配策略与 scanDownloadedModels 一致：精确匹配 → 标准化精确匹配
+     * 匹配策略：精确文件名 → 大小写不敏感精确 → 标准化精确 → 标准化匹配预设ID → 穷举搜索
      */
     fun findModelFile(modelId: String): File? {
         val exact = getModelFile(modelId)
@@ -77,12 +77,31 @@ class ModelRepository(private val modelsDir: File) {
             ?.filter { it.isFile && it.name.endsWith(EXT_LITERTLM) }
             ?: return null
 
-        // 精确文件名匹配
+        // ① 大小写不敏感精确匹配
         candidates.find { it.nameWithoutExtension.equals(modelId, ignoreCase = true) }
             ?.let { return it }
 
-        // 标准化精确匹配（处理连字符/下划线差异）
-        return candidates.find { normalizeName(it.nameWithoutExtension) == targetNorm }
+        // ② 标准化精确匹配（处理连字符/下划线差异）
+        candidates.find { normalizeName(it.nameWithoutExtension) == targetNorm }
+            ?.let { return it }
+
+        // ③ 标准化匹配预设ID（处理文件名中的额外标记，如 -it 后缀）
+        val matchingPreset = ModelInfo.PRESET_MODELS.find { normalizeName(it.id) == targetNorm }
+        if (matchingPreset != null) {
+            val presetNorm = normalizeName(matchingPreset.id)
+            candidates.find { normalizeName(it.nameWithoutExtension).contains(presetNorm) }
+                ?.let { return it }
+        }
+
+        // ④ 终局兜底：穷举搜索（为自定义导入模型提供保障）
+        // 当 modelsDir 路径变更导致精确路径失效时，遍历所有 .litertlm 文件
+        // 匹配条件：标准化后的 modelId 是文件名的子串 或 文件名是 modelId 的子串
+        candidates.find { candidate ->
+            val candNorm = normalizeName(candidate.nameWithoutExtension)
+            candNorm.contains(targetNorm) || targetNorm.contains(candNorm)
+        }?.let { return it }
+
+        return null
     }
 
     /**

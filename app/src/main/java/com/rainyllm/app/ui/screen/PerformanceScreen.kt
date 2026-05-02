@@ -29,7 +29,7 @@ import kotlinx.coroutines.delay
 import java.io.RandomAccessFile
 
 @Composable
-fun PerformanceScreen() {
+fun PerformanceScreen(isVisible: Boolean = true) {
     val context = LocalContext.current
     val scrollState = rememberScrollState()
 
@@ -38,7 +38,9 @@ fun PerformanceScreen() {
     var diskInfo by remember { mutableStateOf(DiskSnapshot()) }
     var cpuInfo by remember { mutableStateOf(CpuSnapshot()) }
 
-    LaunchedEffect(Unit) {
+    // 修复：仅在 Tab 可见时轮询
+    LaunchedEffect(isVisible) {
+        if (!isVisible) return@LaunchedEffect
         while (true) {
             memInfo = collectMemoryInfo(context)
             diskInfo = collectDiskInfo()

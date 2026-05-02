@@ -6,6 +6,7 @@ import android.os.Build
 import android.util.Log
 import com.rainyllm.app.service.KeepAliveService
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 
 /**
  * RainyLLM Application 类
@@ -41,11 +42,13 @@ class RainyLLMApp : Application() {
     }
 
     private fun startKeepAliveIfNeeded() {
-        // 延迟读取 DataStore 后启动（首次启动需等 DataStore 初始化）
-        kotlinx.coroutines.MainScope().launch {
+        // 使用 GlobalScope 一次性读取（应用级协程，无生命周期绑定）
+        // 修复：使用 first() 替代 collect + 异常中断，避免资源泄漏
+        kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
             kotlinx.coroutines.delay(500L)
-            val prefs = com.rainyllm.app.data.AppPreferences(this@RainyLLMApp)
-            prefs.keepAlive.collect { enabled ->
+            try {
+                val prefs = com.rainyllm.app.data.AppPreferences(this@RainyLLMApp)
+                val enabled = prefs.keepAlive.first()
                 if (enabled) {
                     val intent = Intent(this@RainyLLMApp, KeepAliveService::class.java)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -54,8 +57,8 @@ class RainyLLMApp : Application() {
                         startService(intent)
                     }
                 }
-                // 只执行一次
-                throw kotlinx.coroutines.CancellationException()
+            } catch (_: Exception) {
+                // DataStore 可能尚未初始化，静默失败
             }
         }
     }

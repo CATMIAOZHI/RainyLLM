@@ -99,10 +99,10 @@ fun MainScreen() {
                             .blockAllTouchWhenHidden(isVisible)
                     ) {
                         when (screen.route) {
-                            Screen.Dashboard.route -> DashboardScreen()
-                            Screen.Models.route -> ModelManagerScreen()
+                            Screen.Dashboard.route -> DashboardScreen(isVisible = isVisible)
+                            Screen.Models.route -> ModelManagerScreen(isVisible = isVisible)
                             Screen.Chat.route -> ChatTestScreen()
-                            Screen.Performance.route -> PerformanceScreen()
+                            Screen.Performance.route -> PerformanceScreen(isVisible = isVisible)
                             Screen.Settings.route -> SettingsScreen()
                         }
                     }

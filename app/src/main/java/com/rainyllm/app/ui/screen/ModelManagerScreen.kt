@@ -26,11 +26,12 @@ import com.rainyllm.app.model.ModelRepository
 import com.rainyllm.app.model.ModelValidator
 import com.rainyllm.app.ui.component.ModelDownloadCard
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
-fun ModelManagerScreen() {
+fun ModelManagerScreen(isVisible: Boolean = true) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val prefs = remember { AppPreferences(context) }
@@ -42,13 +43,10 @@ fun ModelManagerScreen() {
     var models by remember { mutableStateOf(repo.getAllModels()) }
     var selectedModelId by remember { mutableStateOf("gemma4-e2b") }
 
-    // 从 DataStore 加载已保存的模型选择
+    // 从 DataStore 加载已保存的模型选择（无条件恢复用户选择）
     LaunchedEffect(Unit) {
         prefs.selectedModel.collect { savedModel ->
-            // 只有已下载的模型才能被选为当前模型
-            if (repo.isModelDownloaded(savedModel)) {
-                selectedModelId = savedModel
-            }
+            selectedModelId = savedModel
         }
     }
     var downloadProgresses by remember { mutableStateOf(mapOf<String, Int>()) }
@@ -94,7 +92,7 @@ fun ModelManagerScreen() {
                     .find { it.file.name == fileName }
                 if (downloaded != null) {
                     selectedModelId = downloaded.modelInfo.id
-                    scope.launch { prefs.setSelectedModel(downloaded.modelInfo.id) }
+                    GlobalScope.launch(Dispatchers.IO) { prefs.setSelectedModel(downloaded.modelInfo.id) }
                 }
                 "✅ 导入成功！${result.name}"
             } else {
@@ -132,8 +130,9 @@ fun ModelManagerScreen() {
         }
     }
 
-    LaunchedEffect(Unit) {
-        // 定期刷新进度
+    // 修复：仅在 Tab 可见或有下载任务时轮询进度
+    LaunchedEffect(isVisible, downloadingIds.size) {
+        if (!isVisible && downloadingIds.isEmpty()) return@LaunchedEffect
         while (true) {
             downloadingIds.forEach { modelId ->
                 val downloadId = downloadIdsMap[modelId] ?: return@forEach
@@ -168,7 +167,7 @@ fun ModelManagerScreen() {
                     } else {
                         // ✅ 下载校验成功后，自动切换到新模型
                         selectedModelId = modelId
-                        scope.launch { prefs.setSelectedModel(modelId) }
+                        GlobalScope.launch(Dispatchers.IO) { prefs.setSelectedModel(modelId) }
                         importMessage = "✅ ${modelInfo?.name ?: modelId} 已下载并自动选中喵~"
                     }
                 } else if (progress < 0) {
@@ -304,13 +303,13 @@ fun ModelManagerScreen() {
                         if (selectedModelId == model.modelInfo.id) {
                             // 如果删除的是当前选中的模型，回退到默认模型
                             selectedModelId = "gemma4-e2b"
-                            scope.launch { prefs.setSelectedModel("gemma4-e2b") }
+                            GlobalScope.launch(Dispatchers.IO) { prefs.setSelectedModel("gemma4-e2b") }
                         }
                         models = repo.getAllModels()
                     },
                     onSelect = {
                         selectedModelId = model.modelInfo.id
-                        scope.launch { prefs.setSelectedModel(model.modelInfo.id) }
+                        GlobalScope.launch(Dispatchers.IO) { prefs.setSelectedModel(model.modelInfo.id) }
                     },
                     onExport = {
                         exportModelId = model.modelInfo.id

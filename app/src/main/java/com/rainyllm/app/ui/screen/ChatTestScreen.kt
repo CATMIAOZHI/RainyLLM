@@ -134,13 +134,9 @@ fun ChatTestScreen(
                 val fallbackPath = "${RainyLLMApp.instance.modelsDir}/${selectedModel}.litertlm"
                 if (java.io.File(fallbackPath).exists()) fallbackPath else null
             }
-            // 第 3 层：扫描目录中任意已下载的模型
+            // 第 3 层：扫描目录中任意已下载的模型（仅用于引擎加载，不修改用户选择）
             ?: repo.scanDownloadedModels().firstOrNull()?.let {
-                Log.w("ChatTestScreen", "未找到模型 $selectedModel，回退到第一个已下载模型: ${it.modelInfo.id}")
-                if (it.modelInfo.id != selectedModel) {
-                    selectedModel = it.modelInfo.id
-                    scope.launch { prefs.setSelectedModel(it.modelInfo.id) }
-                }
+                Log.w("ChatTestScreen", "未找到模型 $selectedModel，临时回退到 ${it.modelInfo.id}（不改变用户选择）")
                 it.file.absolutePath
             }
             // 第 4 层：最后的 fallback

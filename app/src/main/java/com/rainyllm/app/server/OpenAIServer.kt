@@ -13,7 +13,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import java.io.IOException
 import java.io.OutputStream
-import java.io.PrintWriter
 import java.time.Instant
 import java.util.*
 import fi.iki.elonen.NanoHTTPD
@@ -52,6 +51,16 @@ class OpenAIServer(
     /** 暂存响应摘要（handler 先于 logRequest 执行，需滞后写入） */
     @Volatile
     private var pendingResponseSummary: String? = null
+
+    /** 暂存请求体（同上 — handler 中读取，serve() 中写入日志） */
+    @Volatile
+    private var pendingRequestBody: String? = null
+
+    /** 暂存 token 计数（sync 路径 — serve() 中滞后写入） */
+    @Volatile
+    private var pendingPromptTokens: Int = 0
+    @Volatile
+    private var pendingCompletionTokens: Int = 0
 
     /** 最近一次推理错误的详细信息（含堆栈），供 UI 调试面板读取 */
     @Volatile
@@ -109,8 +118,17 @@ class OpenAIServer(
 
             // handler 可能先于 logRequest 产生了摘要，滞后写入
             pendingResponseSummary?.let {
-                setLogEntryAt(logIdx, it, elapsed)
+                setLogEntryAt(logIdx, it, elapsed,
+                    pendingPromptTokens, pendingCompletionTokens)
                 pendingResponseSummary = null
+                pendingPromptTokens = 0
+                pendingCompletionTokens = 0
+            }
+
+            // 请求体同理 — handler 中暂存，此处滞后写入
+            pendingRequestBody?.let {
+                setLogEntryBody(logIdx, it)
+                pendingRequestBody = null
             }
 
             // CORS preflight 已在 handleCorsPreflight() 中自行添加 headers，无需重复
@@ -161,8 +179,8 @@ class OpenAIServer(
             return jsonResponse(Response.Status.BAD_REQUEST,
                 """{"error":{"message":"Empty request body"}}""")
 
-        // 捕获请求体到日志（在 logRequest 之后通过 append 补充）
-        appendLastLogRequestDetail(bodyJson.take(8000))
+        // 暂存请求体，由 serve() 在 logRequest 之后写入日志
+        pendingRequestBody = bodyJson.take(8000)
 
         val request = RequestParser.parseChatCompletionRequest(bodyJson)
         val isStream = request["stream"] as? Boolean ?: false
@@ -329,6 +347,8 @@ private fun handleSyncResponse(
 
             stats.addRequest(finalPromptTokens, finalCompletionTokens)
             pendingResponseSummary = responseJson.take(500)
+            pendingPromptTokens = finalPromptTokens
+            pendingCompletionTokens = finalCompletionTokens
             jsonResponse(Response.Status.OK, responseJson)
         } catch (e: Exception) {
             val detail = "推理失败 · 类型: ${e.javaClass.simpleName} · 消息: ${e.message}\n" +
@@ -367,25 +387,28 @@ private fun handleSyncResponse(
 
             override fun send(outputStream: OutputStream) {
                 val streamStart = System.currentTimeMillis()
-                val pw = PrintWriter(outputStream, true)
-                pw.print("HTTP/1.1 200 OK\r\n")
-                pw.print("Content-Type: text/event-stream; charset=utf-8\r\n")
-                pw.print("Transfer-Encoding: chunked\r\n")
-                pw.print("Access-Control-Allow-Origin: *\r\n")
-                pw.print("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n")
-                pw.print("Access-Control-Allow-Headers: Content-Type, Authorization\r\n")
-                pw.print("Connection: keep-alive\r\n")
-                pw.print("\r\n")
-                pw.flush()
+                // 先写 HTTP 响应头（必须！override send() 绕过了 NanoHTTPd 默认行为）
+                val header = buildString {
+                    append("HTTP/1.1 200 OK\r\n")
+                    append("Content-Type: text/event-stream; charset=utf-8\r\n")
+                    append("Access-Control-Allow-Origin: *\r\n")
+                    append("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n")
+                    append("Access-Control-Allow-Headers: Content-Type, Authorization\r\n")
+                    append("Connection: keep-alive\r\n")
+                    append("\r\n")
+                }
+                outputStream.write(header.toByteArray(Charsets.UTF_8))
+                outputStream.flush()
+
+                var totalResponseText = ""
 
                 try {
                     val id = "chatcmpl-${UUID.randomUUID().toString().take(8)}"
                     val created = Instant.now().epochSecond
 
-                    writeChunk(outputStream,
+                    writeSseFrame(outputStream,
                         SseFormatter.buildSseChunk(id, responseModel, created, "assistant", null))
 
-                    var totalTokens = 0
                     runBlocking(Dispatchers.IO) {
                         val flow = if (isMultimodal) {
                             llmEngine.generateResponseAsync(conversation, Contents.of(multimodalContents))
@@ -393,8 +416,8 @@ private fun handleSyncResponse(
                             llmEngine.generateResponseAsync(conversation, prompt)
                         }
                         flow.collect { token ->
-                            totalTokens++
-                            writeChunk(outputStream,
+                            totalResponseText += token
+                            writeSseFrame(outputStream,
                                 SseFormatter.buildSseChunk(id, responseModel, created, null, token))
                         }
                     }
@@ -402,19 +425,33 @@ private fun handleSyncResponse(
                     // 尝试从引擎获取真实 token 计数
                     val actualDecode = getBenchmarkTokenCount(conversation) { it.lastDecodeTokenCount }
                     val actualPrefill = getBenchmarkTokenCount(conversation) { it.lastPrefillTokenCount }
-                    val finalCompletionTokens = if (actualDecode > 0) actualDecode else totalTokens
-                    val finalPromptTokens = if (actualPrefill > 0) actualPrefill else promptTokens
+                    // 修复：回退方案改用 TokenEstimator 而非简单计数器
+                    val finalCompletionTokens = if (actualDecode > 0)
+                        actualDecode
+                    else
+                        TokenEstimator.estimateCompletionTokens(totalResponseText)
+                    // promptTokens 已在 handleChatCompletion 中预计算（含多模态），直接用于回退
+                    val finalPromptTokens = if (actualPrefill > 0)
+                        actualPrefill
+                    else
+                        promptTokens
 
-                    // 最后 chunk：done
-                    writeChunk(outputStream,
+                    // 最后 chunk：done（含 usage）
+                    writeSseFrame(outputStream,
                         SseFormatter.buildSseDone(id, responseModel, created, finalPromptTokens, finalCompletionTokens))
-                    writeFinalChunk(outputStream)
 
                     stats.addRequest(finalPromptTokens, finalCompletionTokens)
                     val elapsed = System.currentTimeMillis() - streamStart
                     if (sseLogIndex >= 0) {
-                        setLogEntryAt(sseLogIndex,
-                            "SSE 流式输出 · ${finalCompletionTokens} tokens", elapsed)
+                        val summary = buildString {
+                            append("SSE 流式 · ${finalCompletionTokens} tokens")
+                            if (totalResponseText.isNotEmpty()) {
+                                append("\n\n")
+                                append(totalResponseText.take(8000))
+                            }
+                        }
+                        setLogEntryAt(sseLogIndex, summary, elapsed,
+                                finalPromptTokens, finalCompletionTokens)
                     }
                 } catch (e: IOException) {
                     Log.d(TAG, "SSE 客户端断开连接")
@@ -430,19 +467,9 @@ private fun handleSyncResponse(
         }
     }
 
-    /** 写一个 chunk 帧: <hex size>\r\n<data>\r\n */
-    private fun writeChunk(outputStream: OutputStream, data: String) {
-        val bytes = data.toByteArray(Charsets.UTF_8)
-        val header = "${bytes.size.toString(16)}\r\n"
-        outputStream.write(header.toByteArray())
-        outputStream.write(bytes)
-        outputStream.write("\r\n".toByteArray())
-        outputStream.flush()
-    }
-
-    /** 写终止 chunk: 0\r\n\r\n */
-    private fun writeFinalChunk(outputStream: OutputStream) {
-        outputStream.write("0\r\n\r\n".toByteArray())
+    /** 写 SSE 数据帧：直接裸写，SSE 自带 data:\\n\\n 帧格式，无需 HTTP chunked */
+    private fun writeSseFrame(outputStream: OutputStream, data: String) {
+        outputStream.write(data.toByteArray(Charsets.UTF_8))
         outputStream.flush()
     }
 
@@ -538,7 +565,9 @@ private fun handleSyncResponse(
         val statusCode: Int,
         val elapsedMs: Long,
         val requestBody: String = "",
-        val responseSummary: String = ""
+        val responseSummary: String = "",
+        val promptTokens: Int = 0,
+        val completionTokens: Int = 0
     )
 
     class ServerStats {
@@ -570,20 +599,24 @@ private fun handleSyncResponse(
     /**
      * 按索引精确更新日志条目（用于 SSE 等异步场景）
      */
-    private fun setLogEntryAt(index: Int, summary: String, elapsedMs: Long) {
+    private fun setLogEntryAt(
+        index: Int, summary: String, elapsedMs: Long,
+        promptTokens: Int = 0, completionTokens: Int = 0
+    ) {
         if (index >= 0 && index < requestLog.size) {
             requestLog[index] = requestLog[index].copy(
                 responseSummary = summary.take(500),
-                elapsedMs = elapsedMs
+                elapsedMs = elapsedMs,
+                promptTokens = promptTokens,
+                completionTokens = completionTokens
             )
         }
     }
 
-    /** handler 内部补写请求体到最近一条日志 */
-    private fun appendLastLogRequestDetail(body: String) {
-        if (requestLog.isNotEmpty()) {
-            val last = requestLog.last()
-            requestLog[requestLog.lastIndex] = last.copy(requestBody = body)
+    /** handler 内部补写请求体到指定索引的日志条目 */
+    private fun setLogEntryBody(index: Int, body: String) {
+        if (index >= 0 && index < requestLog.size) {
+            requestLog[index] = requestLog[index].copy(requestBody = body)
         }
     }
 
@@ -621,8 +654,13 @@ private fun handleSyncResponse(
         val entry = LogEntry(System.currentTimeMillis(), method, path, statusCode, elapsedMs,
             requestBody = requestBody, responseSummary = responseSummary)
         requestLog.add(entry)
-        if (requestLog.size > 200) requestLog.removeAt(0)
+        if (requestLog.size > 1000) requestLog.removeAt(0)
         return nextLogIndex.getAndIncrement()
+    }
+
+    /** 清空请求日志 */
+    fun clearRequestLog() {
+        requestLog.clear()
     }
 
     /**

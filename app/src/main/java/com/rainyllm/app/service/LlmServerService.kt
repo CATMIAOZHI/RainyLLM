@@ -50,6 +50,10 @@ class LlmServerService : Service() {
     private var openAIServer: OpenAIServer? = null
     private var conversationPool: ConversationPool? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    /** 修复：持有初始化线程引用，支持 stopAll() 中断 */
+    @Volatile private var initThread: Thread? = null
+    /** 修复：原子标记防止重复初始化 */
+    @Volatile private var isInitializing: Boolean = false
 
     // 公开可查询
     var isEngineReady: Boolean = false
@@ -96,9 +100,17 @@ class LlmServerService : Service() {
     }
 
     private fun initializeEngine(modelPath: String, cacheDir: String, port: Int, modelId: String) {
+        // 修复：防重入 — 如果正在初始化则忽略后续请求
+        if (isInitializing) {
+            Log.w(TAG, "引擎已在初始化中，忽略重复启动请求")
+            return
+        }
+        isInitializing = true
         // 清空上次错误
         setLastInitError(null)
-        Thread {
+        // 修复：先中断旧线程防止重复初始化
+        initThread?.interrupt()
+        val thread = Thread {
             try {
                 updateNotification("正在加载模型…")
 
@@ -134,6 +146,9 @@ class LlmServerService : Service() {
                 }
                 Log.i(TAG, "推理后端: $backendStr → $backend")
 
+                // 检查是否已被中断
+                if (Thread.currentThread().isInterrupted) return@Thread
+
                 // 初始化引擎（initialize 是 suspend 函数，需 runBlocking 桥接）
                 val engine = LlmEngine(
                     modelPath, cacheDir,
@@ -148,6 +163,9 @@ class LlmServerService : Service() {
                 }
                 llmEngine = engine
                 Log.i(TAG, "引擎 initialize() 完成，模型已加载")
+
+                // 再次检查中断
+                if (Thread.currentThread().isInterrupted) return@Thread
 
                 conversationPool = ConversationPool(engine, idleTimeoutMs = timeoutMs, samplerConfig = samplerConfig)
                 conversationPool?.startAutoCleanup()
@@ -174,6 +192,8 @@ class LlmServerService : Service() {
                 updateNotification("🤖 RainyLLM 运行中 | 端口: $port")
                 Log.i(TAG, "✅ 引擎 + 服务器初始化完成")
 
+            } catch (e: InterruptedException) {
+                Log.i(TAG, "初始化线程被中断")
             } catch (e: Exception) {
                 Log.e(TAG, "初始化失败: ${e.message}", e)
                 isEngineReady = false
@@ -183,12 +203,20 @@ class LlmServerService : Service() {
                 // ★ Bug修复：引擎初始化失败后停止服务，避免僵尸状态
                 stopAll()
                 stopSelf()
+            } finally {
+                isInitializing = false
             }
-        }.start()
+        }
+        initThread = thread
+        thread.start()
     }
 
     private fun stopAll() {
         try {
+            isInitializing = false
+            // 修复：中断初始化线程，防止泄漏
+            initThread?.interrupt()
+            initThread = null
             openAIServer?.stop()
             conversationPool?.shutdown()
             llmEngine?.close()

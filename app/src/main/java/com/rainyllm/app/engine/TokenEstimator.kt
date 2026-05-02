@@ -140,7 +140,8 @@ object TokenEstimator {
         val cjkChars = CJK_PATTERN.findAll(text).count()
         val digitChars = DIGIT_PATTERN.findAll(text).count()
         val newlineCount = NEWLINE_PATTERN.findAll(text).count()
-        val remaining = totalLen - cjkChars - digitChars
+        // 修复：remaining 需排除已单独计数的换行符，避免被 ASCII 分支重复计数
+        val remaining = (totalLen - cjkChars - digitChars - newlineCount).coerceAtLeast(0)
 
         val cjkTokens = cjkChars / CJK_CHARS_PER_TOKEN
         val digitTokens = digitChars / DIGIT_CHARS_PER_TOKEN
