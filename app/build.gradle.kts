@@ -1,6 +1,19 @@
- plugins {
+import java.util.Properties
+
+plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+}
+
+// ★ 从 local.properties 或环境变量读取签名凭据（不硬编码）
+val localProperties = Properties()
+val localPropertiesFile = rootProject.file("local.properties")
+if (localPropertiesFile.exists()) {
+    localProperties.load(localPropertiesFile.inputStream())
+}
+fun signingProp(name: String): String {
+    return localProperties.getProperty(name)
+        ?: System.getenv(name) ?: ""
 }
 
 android {
@@ -10,9 +23,9 @@ android {
     signingConfigs {
         create("release") {
             storeFile = rootProject.file("release.jks")
-            storePassword = "rainy2fa"
-            keyAlias = "rainy2fa"
-            keyPassword = "rainy2fa"
+            storePassword = signingProp("RELEASE_STORE_PASSWORD")
+            keyAlias = signingProp("RELEASE_KEY_ALIAS")
+            keyPassword = signingProp("RELEASE_KEY_PASSWORD")
         }
     }
 

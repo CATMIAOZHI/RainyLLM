@@ -6,12 +6,16 @@ import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.ExperimentalApi
+import com.google.ai.edge.litertlm.OpenApiTool
 import com.google.ai.edge.litertlm.SamplerConfig
+import com.google.ai.edge.litertlm.ToolProvider
+import com.google.ai.edge.litertlm.tool
 import com.rainyllm.app.data.StatsRepository
 import com.rainyllm.app.engine.LlmEngine
 import com.rainyllm.app.engine.TokenEstimator
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.IOException
 import java.io.OutputStream
 import java.time.Instant
@@ -192,6 +196,17 @@ class OpenAIServer(
 
         val requestSamplerConfig = buildRequestSamplerConfig(request)
 
+        // ★ 解析 tools → LiteRT-LM Tool 列表
+        val toolsParam = request["tools"] as? List<Map<String, Any>>
+        val lmTools: List<com.google.ai.edge.litertlm.ToolProvider>? = toolsParam?.mapNotNull { t ->
+            val fn = t["function"] as? Map<*, *> ?: return@mapNotNull null
+            ToolAdapter(
+                name = fn["name"]?.toString() ?: return@mapNotNull null,
+                description = fn["description"]?.toString() ?: "",
+                parametersJson = fn["parameters"]?.toString() ?: "{}"
+            ).let { tool(it) }
+        }?.takeUnless { it.isEmpty() }
+
         // ── 解析 messages 数组 ──
         val allMessages = (request["messages"] as? List<Map<String, Any>>) ?: emptyList()
         if (allMessages.isEmpty())
@@ -205,24 +220,26 @@ class OpenAIServer(
 
         // 非 system 消息
         val nonSystem = allMessages.filter { it["role"] != "system" }
-
-        // 找到最后一条 user 消息的位置
-        val lastUserIdx = nonSystem.indexOfLast { it["role"] == "user" }
-        if (lastUserIdx < 0)
+        if (nonSystem.isEmpty())
             return jsonResponse(Response.Status.BAD_REQUEST,
-                """{"error":{"message":"No user message found"}}""")
+                """{"error":{"message":"No user/system messages provided"}}""")
 
-        // 历史：最后一条 user 之前的所有消息 → initialMessages
-        val historyRaw = nonSystem.take(lastUserIdx)
-        // 当前 prompt：最后一条 user 消息
-        val currentMsg = nonSystem[lastUserIdx]
+        // ★ 关键修复：无状态 API — 所有非 system 消息（含 tool）都是上下文
+        // 最后一条消息之前的全部 → initialMessages（预填 KV Cache）
+        // 最后一条消息 → 当前 prompt（sendMessage 输入）
+        val historyRaw = nonSystem.dropLast(1)
+        val currentMsg = nonSystem.last()
 
         // ── 解析当前 prompt ──
+        // 最后一条非 system 消息不一定是 user（可能是 tool）
         var prompt: String
         val multimodalContents = mutableListOf<Content>()
         val contentField = currentMsg["content"]
-        when (contentField) {
-            is List<*> -> {
+        val currentRole = currentMsg["role"]?.toString() ?: "user"
+
+        when {
+            // 多模态 user 消息
+            contentField is List<*> -> {
                 val textParts = mutableListOf<String>()
                 for (part in contentField) {
                     val partMap = part as? Map<*, *> ?: continue
@@ -247,8 +264,13 @@ class OpenAIServer(
                 prompt = textParts.joinToString("\n").ifBlank { "请描述以下内容" }
                 multimodalContents.add(Content.Text(prompt))
             }
-            is String -> prompt = contentField
-            else -> prompt = contentField?.toString() ?: ""
+            // tool 消息 — 将工具返回结果作为文本继续推理
+            currentRole == "tool" -> {
+                prompt = contentField?.toString() ?: "继续"
+            }
+            // 普通文本（user / assistant）
+            contentField is String -> prompt = contentField
+            else -> prompt = contentField?.toString() ?: "继续"
         }
 
         // ── 构建 initialMessages ──
@@ -269,10 +291,10 @@ class OpenAIServer(
 
         return if (isStream) {
             handleStreamResponse(prompt, systemPrompt, promptTokens, multimodalContents,
-                responseModel, requestSamplerConfig, historyLm)
+                responseModel, requestSamplerConfig, historyLm, lmTools)
         } else {
             handleSyncResponse(prompt, systemPrompt, promptTokens, multimodalContents,
-                responseModel, requestSamplerConfig, historyLm)
+                responseModel, requestSamplerConfig, historyLm, lmTools)
         }
     }
 
@@ -308,8 +330,11 @@ class OpenAIServer(
                     com.google.ai.edge.litertlm.Message.user(content)
                 }
                 "assistant" -> {
-                    val content = msg["content"]?.toString() ?: ""
-                    com.google.ai.edge.litertlm.Message.model(content)
+                    val content = msg["content"]?.toString()?.takeIf { it.isNotBlank() } ?: ""
+                    // 如果有 tool_calls 但 content 为空，用简记标记（不影响 KV Cache 语义）
+                    val hasToolCalls = msg["tool_calls"] != null
+                    val effectiveContent = if (hasToolCalls && content.isEmpty()) "(tool)" else content
+                    com.google.ai.edge.litertlm.Message.model(effectiveContent)
                 }
                 "tool" -> {
                     val toolCallId = msg["tool_call_id"]?.toString() ?: return@mapNotNull null
@@ -365,7 +390,8 @@ private fun handleSyncResponse(
         multimodalContents: List<Content>,
         responseModel: String = modelId,
         requestSamplerConfig: SamplerConfig? = null,
-        historyMessages: List<com.google.ai.edge.litertlm.Message> = emptyList()
+        historyMessages: List<com.google.ai.edge.litertlm.Message> = emptyList(),
+        tools: List<com.google.ai.edge.litertlm.ToolProvider>? = null
     ): Response {
         val syncStart = System.currentTimeMillis()
         return try {
@@ -373,14 +399,17 @@ private fun handleSyncResponse(
             val config = ConversationConfig(
                 systemInstruction = if (systemPrompt != null) Contents.of(systemPrompt) else null,
                 samplerConfig = sampler,
-                initialMessages = historyMessages
+                initialMessages = historyMessages,
+                tools = tools ?: emptyList(),
+                automaticToolCalling = false  // 不自动执行 → 返回 tool_calls 给客户端
             )
             val isMultimodal = multimodalContents.size > 1
             val result: String
             val actualPromptTokens: Int
             val actualCompletionTokens: Int
+            var toolCallsData: List<ToolCallData>? = null
 
-            runBlocking(Dispatchers.IO) {
+            runBlocking {
                 inferenceLock.lock()
                 try {
                     llmEngine.createConversation(config).use { conversation ->
@@ -390,6 +419,17 @@ private fun handleSyncResponse(
                             conversation.sendMessage(prompt)
                         }
                         result = responseMsg.toString()
+
+                        // 检查 tool_calls
+                        if (responseMsg.toolCalls.isNotEmpty()) {
+                            toolCallsData = responseMsg.toolCalls.mapIndexed { idx, tc ->
+                                ToolCallData(
+                                    id = "call_${UUID.randomUUID().toString().take(8)}",
+                                    name = tc.name,
+                                    arguments = (tc.arguments as? Map<*, *>)?.let { JSONObject(it).toString() } ?: "{}"
+                                )
+                            }
+                        }
 
                         // 尝试从引擎获取真实 token 计数（需要 benchmark 模式启用）
                         actualPromptTokens = getBenchmarkTokenCount(conversation) { it.lastPrefillTokenCount }
@@ -414,10 +454,11 @@ private fun handleSyncResponse(
                 TokenEstimator.estimateCompletionTokens(result)
 
             val responseJson = buildChatResponseJson(
-                content = result,
+                content = if (toolCallsData != null) null else result,
                 model = responseModel,
                 promptTokens = finalPromptTokens,
-                completionTokens = finalCompletionTokens
+                completionTokens = finalCompletionTokens,
+                toolCalls = toolCallsData
             )
 
             val durationMs = System.currentTimeMillis() - syncStart
@@ -453,18 +494,19 @@ private fun handleSyncResponse(
         multimodalContents: List<Content>,
         responseModel: String = modelId,
         requestSamplerConfig: SamplerConfig? = null,
-        historyMessages: List<com.google.ai.edge.litertlm.Message> = emptyList()
+        historyMessages: List<com.google.ai.edge.litertlm.Message> = emptyList(),
+        tools: List<com.google.ai.edge.litertlm.ToolProvider>? = null
     ): Response {
         val sampler = requestSamplerConfig ?: samplerConfigSupplier?.invoke() ?: defaultSamplerConfig
         val config = ConversationConfig(
             systemInstruction = if (systemPrompt != null) Contents.of(systemPrompt) else null,
             samplerConfig = sampler,
-            initialMessages = historyMessages
+            initialMessages = historyMessages,
+            tools = tools ?: emptyList(),
+            automaticToolCalling = false
         )
         val conversation = llmEngine.createConversation(config)
         val isMultimodal = multimodalContents.size > 1
-
-        // logIndex 由 serve() 在 logRequest 返回后通过 setter 注入
         var sseLogIndex = -1
 
         return object : Response(
@@ -474,7 +516,6 @@ private fun handleSyncResponse(
 
             override fun send(outputStream: OutputStream) {
                 val streamStart = System.currentTimeMillis()
-                // 先写 HTTP 响应头（必须！override send() 绕过了 NanoHTTPd 默认行为）
                 val header = buildString {
                     append("HTTP/1.1 200 OK\r\n")
                     append("Content-Type: text/event-stream; charset=utf-8\r\n")
@@ -488,6 +529,7 @@ private fun handleSyncResponse(
                 outputStream.flush()
 
                 var totalResponseText = ""
+                var lastMessage: com.google.ai.edge.litertlm.Message? = null
 
                 try {
                     val id = "chatcmpl-${UUID.randomUUID().toString().take(8)}"
@@ -498,34 +540,34 @@ private fun handleSyncResponse(
 
                     inferenceLock.lock()
                     try {
-                        runBlocking(Dispatchers.IO) {
-                            val flow = if (isMultimodal) {
-                                llmEngine.generateResponseAsync(conversation, Contents.of(multimodalContents))
+                        runBlocking {
+                            val rawFlow = if (isMultimodal) {
+                                conversation.sendMessageAsync(Contents.of(multimodalContents))
                             } else {
-                                llmEngine.generateResponseAsync(conversation, prompt)
+                                conversation.sendMessageAsync(prompt)
                             }
-                            flow.collect { token ->
-                                totalResponseText += token
+                            rawFlow.collect { msg ->
+                                lastMessage = msg
+                                val text = msg.toString()
+                                totalResponseText += text
                                 writeSseFrame(outputStream,
-                                    SseFormatter.buildSseChunk(id, responseModel, created, null, token))
+                                    SseFormatter.buildSseChunk(id, responseModel, created, null, text))
                             }
                         }
 
-                        // 尝试从引擎获取真实 token 计数
+                        // ★ 检测 tool_calls — 若有则在流中发送
+                        val streamToolCalls = lastMessage?.toolCalls?.takeIf { it.isNotEmpty() }
+                        if (streamToolCalls != null) {
+                            writeSseFrame(outputStream,
+                                SseFormatter.buildSseToolCalls(id, responseModel, created, streamToolCalls))
+                        }
+
                         val actualDecode = getBenchmarkTokenCount(conversation) { it.lastDecodeTokenCount }
                         val actualPrefill = getBenchmarkTokenCount(conversation) { it.lastPrefillTokenCount }
-                        // 修复：回退方案改用 TokenEstimator 而非简单计数器
-                        val finalCompletionTokens = if (actualDecode > 0)
-                            actualDecode
-                        else
-                            TokenEstimator.estimateCompletionTokens(totalResponseText)
-                        // promptTokens 已在 handleChatCompletion 中预计算（含多模态），直接用于回退
-                        val finalPromptTokens = if (actualPrefill > 0)
-                            actualPrefill
-                        else
-                            promptTokens
+                        val finalCompletionTokens = if (actualDecode > 0) actualDecode
+                            else TokenEstimator.estimateCompletionTokens(totalResponseText)
+                        val finalPromptTokens = if (actualPrefill > 0) actualPrefill else promptTokens
 
-                        // 最后 chunk：done（含 usage）
                         writeSseFrame(outputStream,
                             SseFormatter.buildSseDone(id, responseModel, created, finalPromptTokens, finalCompletionTokens))
 
@@ -541,15 +583,10 @@ private fun handleSyncResponse(
                             )
                         )
                         if (sseLogIndex >= 0) {
-                            val summary = buildString {
-                                append("SSE 流式 · ${finalCompletionTokens} tokens")
-                                if (totalResponseText.isNotEmpty()) {
-                                    append("\n\n")
-                                    append(totalResponseText)
-                                }
-                            }
-                            setLogEntryAt(sseLogIndex, summary, elapsed,
-                                    finalPromptTokens, finalCompletionTokens)
+                            setLogEntryAt(sseLogIndex,
+                                "SSE 流式 · ${finalCompletionTokens} tokens" +
+                                    if (totalResponseText.isNotEmpty()) "\n\n$totalResponseText" else "",
+                                elapsed, finalPromptTokens, finalCompletionTokens)
                         }
                     } finally {
                         inferenceLock.unlock()
@@ -557,10 +594,8 @@ private fun handleSyncResponse(
                 } catch (e: IOException) {
                     Log.d(TAG, "SSE 客户端断开连接")
                 } catch (e: Exception) {
-                    val detail = "SSE流式失败 · 类型: ${e.javaClass.simpleName} · ${e.message}\n" +
-                        "堆栈: ${e.stackTraceToString().take(800)}"
-                    lastErrorDetail = detail
-                    Log.e(TAG, detail, e)
+                    lastErrorDetail = "SSE流式失败 · ${e.javaClass.simpleName} · ${e.message}\n${e.stackTraceToString().take(800)}"
+                    Log.e(TAG, lastErrorDetail, e)
                 } finally {
                     try { conversation.close() } catch (_: Exception) {}
                 }
@@ -621,39 +656,59 @@ private fun handleSyncResponse(
         }
     }
 
+    private data class ToolCallData(
+        val id: String,
+        val name: String,
+        val arguments: String
+    )
+
     private fun buildChatResponseJson(
-        content: String,
+        content: String?,
         model: String,
         promptTokens: Int,
-        completionTokens: Int
+        completionTokens: Int,
+        toolCalls: List<ToolCallData>? = null
     ): String {
         val id = "chatcmpl-${UUID.randomUUID().toString().take(8)}"
         val created = Instant.now().epochSecond
-        return """
-        {
-          "id": "$id",
-          "object": "chat.completion",
-          "created": $created,
-          "model": "$model",
-          "choices": [{
-            "index": 0,
-            "message": {
-              "role": "assistant",
-              "content": ${escapeJson(content)}
-            },
-            "finish_reason": "stop"
-          }],
-          "usage": {
-            "prompt_tokens": $promptTokens,
-            "completion_tokens": $completionTokens,
-            "total_tokens": ${promptTokens + completionTokens}
-          }
-        }
-        """.trimIndent()
-    }
 
-    private fun escapeJson(text: String): String {
-        return "\"${text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")}\""
+        val messageObj = JSONObject().apply {
+            put("role", "assistant")
+            if (toolCalls != null) {
+                put("content", JSONObject.NULL)
+                put("tool_calls", JSONArray().apply {
+                    toolCalls.forEachIndexed { idx, tc ->
+                        put(JSONObject().apply {
+                            put("id", tc.id)
+                            put("type", "function")
+                            put("function", JSONObject().apply {
+                                put("name", tc.name)
+                                put("arguments", tc.arguments)
+                            })
+                        })
+                    }
+                })
+            } else {
+                put("content", content ?: "")
+            }
+        }
+
+        return JSONObject().apply {
+            put("id", id)
+            put("object", "chat.completion")
+            put("created", created)
+            put("model", model)
+            put("choices", JSONArray().put(JSONObject().apply {
+                put("index", 0)
+                put("message", messageObj)
+                put("finish_reason", if (toolCalls != null) "tool_calls" else "stop")
+            }))
+            put("usage", JSONObject().apply {
+                put("prompt_tokens", promptTokens)
+                put("completion_tokens", completionTokens)
+                put("total_tokens", promptTokens + completionTokens)
+            })
+        }.toString()
     }
 
     // ── 日志与统计 ────────────────────────────────────────
@@ -785,6 +840,23 @@ private fun handleSyncResponse(
     private interface SseResponse {
         fun setLogIndex(idx: Int)
     }
+}
+
+/**
+ * 将 OpenAI 格式的 function 定义转为 LiteRT-LM OpenApiTool。
+ * 由于 automaticToolCalling = false，execute() 永远不会被调用。
+ */
+private class ToolAdapter(
+    private val name: String,
+    private val description: String,
+    private val parametersJson: String
+) : OpenApiTool {
+    override fun getToolDescriptionJsonString(): String {
+        val escapedDesc = org.json.JSONObject.quote(description)
+        return """{"name":${org.json.JSONObject.quote(name)},"description":$escapedDesc,"parameters":$parametersJson}"""
+    }
+
+    override fun execute(paramsJsonString: String): String = "{}"
 }
 
 private val Response.Status.requestStatus: Int

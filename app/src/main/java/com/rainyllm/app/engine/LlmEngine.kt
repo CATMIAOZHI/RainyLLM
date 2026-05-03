@@ -28,6 +28,7 @@ class LlmEngine(
     private var engine: Engine? = null
     private val engineLock = Any()
 
+    @get:Synchronized
     val isInitialized: Boolean get() = engine != null
 
     /**

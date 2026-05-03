@@ -94,6 +94,9 @@ fun DashboardScreen(isVisible: Boolean = true) {
     // 防抖：启动进行中标记
     var isStarting by remember { mutableStateOf(false) }
 
+    // Composable 协程作用域（替代 MainScope 泄漏）
+    val scope = rememberCoroutineScope()
+
     // 定时轮询服务器状态 — 仅在 Tab 可见时运行
     LaunchedEffect(isVisible) {
         if (!isVisible) return@LaunchedEffect
@@ -154,7 +157,7 @@ fun DashboardScreen(isVisible: Boolean = true) {
                 }
                 cachedLog = merged.takeLast(1000)
                 // 修复：每次日志更新后立即持久化，不受 LaunchedEffect 生命周期限制
-                kotlinx.coroutines.MainScope().launch(Dispatchers.IO) {
+                scope.launch(Dispatchers.IO) {
                     try {
                         val arr = JSONArray()
                         cachedLog.forEach { entry ->
@@ -318,7 +321,7 @@ fun DashboardScreen(isVisible: Boolean = true) {
             onClearLog = {
                 cachedLog = emptyList()
                 // 立即清空持久化文件
-                kotlinx.coroutines.MainScope().launch(Dispatchers.IO) {
+                scope.launch(Dispatchers.IO) {
                     try { logFile.writeText("[]") } catch (_: Exception) {}
                 }
                 // 同步清空服务器日志

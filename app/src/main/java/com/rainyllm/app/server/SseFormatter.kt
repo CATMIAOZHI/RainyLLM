@@ -1,5 +1,7 @@
 package com.rainyllm.app.server
 
+import org.json.JSONArray
+import org.json.JSONObject
 import java.time.Instant
 
 /**
@@ -23,25 +25,26 @@ object SseFormatter {
         role: String? = null,
         content: String? = null
     ): String {
-        val delta = when {
-            role != null -> """{"role":"$role"}"""
-            content != null -> """{"content":${escapeJsonString(content)}}"""
-            else -> """{"content":""}"""
+        val deltaObj = JSONObject()
+        when {
+            role != null -> deltaObj.put("role", role)
+            content != null -> deltaObj.put("content", content)
+            else -> deltaObj.put("content", "")
         }
 
-        val json = """
-        {
-          "id": "$id",
-          "object": "chat.completion.chunk",
-          "created": $created,
-          "model": "$model",
-          "choices": [{
-            "index": 0,
-            "delta": $delta,
-            "finish_reason": null
-          }]
-        }
-        """.trimIndent().replace("\n", "")
+        val choices = JSONArray().put(JSONObject().apply {
+            put("index", 0)
+            put("delta", deltaObj)
+            put("finish_reason", JSONObject.NULL)
+        })
+
+        val json = JSONObject().apply {
+            put("id", id)
+            put("object", "chat.completion.chunk")
+            put("created", created)
+            put("model", model)
+            put("choices", choices)
+        }.toString()
 
         return "data: $json\n\n"
     }
@@ -56,33 +59,61 @@ object SseFormatter {
         promptTokens: Int,
         completionTokens: Int
     ): String {
-        val json = """
-        {
-          "id": "$id",
-          "object": "chat.completion.chunk",
-          "created": $created,
-          "model": "$model",
-          "choices": [{
-            "index": 0,
-            "delta": {},
-            "finish_reason": "stop"
-          }],
-          "usage": {
-            "prompt_tokens": $promptTokens,
-            "completion_tokens": $completionTokens,
-            "total_tokens": ${promptTokens + completionTokens}
-          }
-        }
-        """.trimIndent().replace("\n", "")
+        val json = JSONObject().apply {
+            put("id", id)
+            put("object", "chat.completion.chunk")
+            put("created", created)
+            put("model", model)
+            put("choices", JSONArray().put(JSONObject().apply {
+                put("index", 0)
+                put("delta", JSONObject())
+                put("finish_reason", "stop")
+            }))
+            put("usage", JSONObject().apply {
+                put("prompt_tokens", promptTokens)
+                put("completion_tokens", completionTokens)
+                put("total_tokens", promptTokens + completionTokens)
+            })
+        }.toString()
 
         return "data: $json\n\ndata: [DONE]\n\n"
     }
 
-    private fun escapeJsonString(text: String): String {
-        return "\"${text.replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
-            .replace("\t", "\\t")}\""
+    /**
+     * 构建流式 tool_calls SSE chunk
+     * 将完整 tool_calls 列表作为单个 SSE 帧发送
+     */
+    fun buildSseToolCalls(
+        id: String,
+        model: String,
+        created: Long,
+        toolCalls: List<com.google.ai.edge.litertlm.ToolCall>
+    ): String {
+        val tcArray = JSONArray()
+        toolCalls.forEachIndexed { idx, tc ->
+            tcArray.put(JSONObject().apply {
+                put("index", idx)
+                put("id", "call_${idx}")
+                put("type", "function")
+                put("function", JSONObject().apply {
+                    put("name", tc.name)
+                    put("arguments", (tc.arguments as? Map<*, *>)?.let { JSONObject(it).toString() } ?: "{}")
+                })
+            })
+        }
+        val json = JSONObject().apply {
+            put("id", id)
+            put("object", "chat.completion.chunk")
+            put("created", created)
+            put("model", model)
+            put("choices", JSONArray().put(JSONObject().apply {
+                put("index", 0)
+                put("delta", JSONObject().apply {
+                    put("tool_calls", tcArray)
+                })
+                put("finish_reason", "tool_calls")
+            }))
+        }.toString()
+        return "data: $json\n\n"
     }
 }

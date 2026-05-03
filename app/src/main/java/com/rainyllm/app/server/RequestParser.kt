@@ -33,6 +33,8 @@ object RequestParser {
         if (root.has("top_p")) result["top_p"] = root.optDouble("top_p", 1.0)
         if (root.has("stream")) result["stream"] = root.optBoolean("stream", false)
         if (root.has("user")) result["user"] = root.optString("user", "")
+        if (root.has("tools")) result["tools"] = parseTools(root.optJSONArray("tools"))
+        if (root.has("tool_choice")) result["tool_choice"] = root.optString("tool_choice", "auto")
 
         return result
     }
@@ -45,6 +47,10 @@ object RequestParser {
 
             val map = mutableMapOf<String, Any>()
             map["role"] = role
+
+            // 保留 tool_calls（assistant 消息）和 tool_call_id（tool 消息）
+            if (msg.has("tool_calls")) map["tool_calls"] = msg.get("tool_calls")
+            if (msg.has("tool_call_id")) map["tool_call_id"] = msg.optString("tool_call_id", "")
 
             // 保留原始 content 结构：字符串或数组（多模态）
             if (msg.has("content")) {
@@ -87,5 +93,23 @@ object RequestParser {
             messages.add(map)
         }
         return messages
+    }
+
+    private fun parseTools(array: JSONArray?): List<Map<String, Any>> {
+        if (array == null) return emptyList()
+        val tools = mutableListOf<Map<String, Any>>()
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            val fn = obj.optJSONObject("function") ?: continue
+            tools.add(mapOf(
+                "type" to obj.optString("type", "function"),
+                "function" to mapOf(
+                    "name" to fn.optString("name", ""),
+                    "description" to fn.optString("description", ""),
+                    "parameters" to (fn.optJSONObject("parameters")?.toString() ?: "{}")
+                )
+            ))
+        }
+        return tools
     }
 }

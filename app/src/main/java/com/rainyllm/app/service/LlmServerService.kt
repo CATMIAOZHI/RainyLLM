@@ -7,7 +7,6 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
-import com.rainyllm.app.engine.ConversationPool
 import com.rainyllm.app.engine.LlmEngine
 import com.rainyllm.app.server.OpenAIServer
 import com.rainyllm.app.data.AppPreferences
@@ -16,6 +15,17 @@ import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.SamplerConfig
 import kotlinx.coroutines.flow.first
+
+/**
+ * 引擎初始化参数集（用于合并多次 DataStore 读取为单次 runBlocking）
+ */
+private data class EngineParams(
+    val temp: Float,
+    val topK: Int,
+    val topP: Float,
+    val backendStr: String,
+    val maxNumTokens: Int
+)
 
 /**
  * LLM 推理服务器前台服务
@@ -48,7 +58,6 @@ class LlmServerService : Service() {
 
     private var llmEngine: LlmEngine? = null
     private var openAIServer: OpenAIServer? = null
-    private var conversationPool: ConversationPool? = null
     private var wakeLock: PowerManager.WakeLock? = null
     /** 修复：持有初始化线程引用，支持 stopAll() 中断 */
     @Volatile private var initThread: Thread? = null
@@ -146,34 +155,37 @@ class LlmServerService : Service() {
                 @OptIn(ExperimentalApi::class)
                 ExperimentalFlags.enableBenchmark = true
 
-                // 从设置读取空闲超时与推理参数
+                // 从设置读取所有参数（合并为单次 runBlocking）
                 val prefs = AppPreferences(this@LlmServerService)
-                val timeoutMin = kotlinx.coroutines.runBlocking { prefs.idleTimeoutMin.first() }
-                val timeoutMs = timeoutMin * 60 * 1000L
+                val engineParams = kotlinx.coroutines.runBlocking {
+                    EngineParams(
+                        temp = prefs.temperature.first(),
+                        topK = prefs.topK.first(),
+                        topP = prefs.topP.first(),
+                        backendStr = prefs.backend.first(),
+                        maxNumTokens = prefs.maxTokens.first()
+                    )
+                }
 
-                val samplerConfig = SamplerConfig(
-                    temperature = kotlinx.coroutines.runBlocking { prefs.temperature.first() }.toDouble(),
-                    topK = kotlinx.coroutines.runBlocking { prefs.topK.first() },
-                    topP = kotlinx.coroutines.runBlocking { prefs.topP.first() }.toDouble()
-                )
-
-                val backendStr = kotlinx.coroutines.runBlocking { prefs.backend.first() }
-                val backend = when (backendStr.lowercase()) {
+                val backend = when (engineParams.backendStr.lowercase()) {
                     "gpu" -> Backend.GPU()
                     else -> Backend.CPU()
                 }
-                Log.i(TAG, "推理后端: $backendStr → $backend")
+                Log.i(TAG, "推理后端: ${engineParams.backendStr} → $backend")
 
                 if (Thread.currentThread().isInterrupted) return@Thread
 
-                // 从设置读取 KV Cache 容量（max_tokens），未设置则默认 4096
-                val maxNumTokens = kotlinx.coroutines.runBlocking { prefs.maxTokens.first() }
+                val samplerConfig = SamplerConfig(
+                    temperature = engineParams.temp.toDouble(),
+                    topK = engineParams.topK,
+                    topP = engineParams.topP.toDouble()
+                )
 
                 engine = LlmEngine(
                     modelPath, cacheDir,
                     visionBackend = Backend.GPU(),
                     audioBackend = Backend.CPU(),
-                    maxNumTokens = maxNumTokens
+                    maxNumTokens = engineParams.maxNumTokens
                 )
                 // ★ 修复：立即追踪引擎引用，确保 stopAll() 能关闭未完成初始化的引擎
                 pendingEngine = engine
@@ -186,9 +198,6 @@ class LlmServerService : Service() {
                 Log.i(TAG, "引擎 initialize() 完成，模型已加载")
 
                 if (Thread.currentThread().isInterrupted) return@Thread
-
-                conversationPool = ConversationPool(engine, idleTimeoutMs = timeoutMs, samplerConfig = samplerConfig)
-                conversationPool?.startAutoCleanup()
 
                 val server = OpenAIServer(port, engine, modelId, samplerConfig,
                     samplerConfigSupplier = {
@@ -247,7 +256,6 @@ class LlmServerService : Service() {
             // ★ 修复：stopAll 不再重置 isInitializing，由调用方（initializeEngine/catch）管理
             initThread = null
             openAIServer?.stop()
-            conversationPool?.shutdown()
             llmEngine?.close()
             // ★ 修复：清理尚未完成 initialize() 的引擎（它们在 initThread 中作为局部变量）
             pendingEngine?.close()
@@ -255,7 +263,6 @@ class LlmServerService : Service() {
             Log.w(TAG, "停止时异常: ${e.message}")
         } finally {
             openAIServer = null
-            conversationPool = null
             llmEngine = null
             pendingEngine = null
             wakeLock?.release()

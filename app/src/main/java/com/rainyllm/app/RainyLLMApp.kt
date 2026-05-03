@@ -21,6 +21,9 @@ class RainyLLMApp : Application() {
             private set
     }
 
+    /** 应用级协程作用域（替代 GlobalScope，绑定应用进程生命周期） */
+    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -44,9 +47,7 @@ class RainyLLMApp : Application() {
     }
 
     private fun startKeepAliveIfNeeded() {
-        // 使用 GlobalScope 一次性读取（应用级协程，无生命周期绑定）
-        // 修复：使用 first() 替代 collect + 异常中断，避免资源泄漏
-        kotlinx.coroutines.GlobalScope.launch(Dispatchers.IO) {
+        applicationScope.launch {
             kotlinx.coroutines.delay(500L)
             try {
                 val prefs = com.rainyllm.app.data.AppPreferences(this@RainyLLMApp)
