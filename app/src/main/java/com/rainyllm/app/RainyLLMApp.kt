@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Intent
 import android.os.Build
 import android.util.Log
+import com.rainyllm.app.data.StatsRepository
 import com.rainyllm.app.service.KeepAliveService
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
@@ -23,6 +24,7 @@ class RainyLLMApp : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        StatsRepository.init(this)
         Log.i(TAG, "🐱☁️ RainyLLM 应用启动")
         startKeepAliveIfNeeded()
     }

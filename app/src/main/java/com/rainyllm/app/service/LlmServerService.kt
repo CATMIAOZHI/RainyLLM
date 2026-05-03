@@ -54,6 +54,8 @@ class LlmServerService : Service() {
     @Volatile private var initThread: Thread? = null
     /** 修复：原子标记防止重复初始化 */
     @Volatile private var isInitializing: Boolean = false
+    /** ★ 修复：追踪正在构建但尚未完成 initialize() 的引擎，防止泄漏 */
+    @Volatile private var pendingEngine: LlmEngine? = null
 
     // 公开可查询
     var isEngineReady: Boolean = false
@@ -108,9 +110,27 @@ class LlmServerService : Service() {
         isInitializing = true
         // 清空上次错误
         setLastInitError(null)
-        // 修复：先中断旧线程防止重复初始化
-        initThread?.interrupt()
+
+        // ★ 关键修复：先完整清理旧引擎/旧线程，防止 JNI 层泄漏
+        stopAll()
+        // ★ 修复：stopAll 中断旧线程后，旧线程的 finally 可能清除了 isInitializing，需重新设置
+        isInitializing = true
+
+        // ★ 修复：清理缓存目录中的旧 shader 缓存和临时文件，防止累积膨胀
+        try {
+            val cacheDirFile = java.io.File(cacheDir)
+            if (cacheDirFile.exists()) {
+                cacheDirFile.listFiles()?.forEach { file ->
+                    try { file.deleteRecursively() } catch (_: Exception) {}
+                }
+                Log.i(TAG, "缓存目录已清理: $cacheDir")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "清理缓存目录失败: ${e.message}")
+        }
+
         val thread = Thread {
+            var engine: LlmEngine? = null
             try {
                 updateNotification("正在加载模型…")
 
@@ -126,11 +146,10 @@ class LlmServerService : Service() {
                 @OptIn(ExperimentalApi::class)
                 ExperimentalFlags.enableBenchmark = true
 
-                // 从设置读取空闲超时与推理参数（必须在引擎创建前）
+                // 从设置读取空闲超时与推理参数
                 val prefs = AppPreferences(this@LlmServerService)
                 val timeoutMin = kotlinx.coroutines.runBlocking { prefs.idleTimeoutMin.first() }
                 val timeoutMs = timeoutMin * 60 * 1000L
-                val maxTokens = kotlinx.coroutines.runBlocking { prefs.maxTokens.first() }
 
                 val samplerConfig = SamplerConfig(
                     temperature = kotlinx.coroutines.runBlocking { prefs.temperature.first() }.toDouble(),
@@ -138,7 +157,6 @@ class LlmServerService : Service() {
                     topP = kotlinx.coroutines.runBlocking { prefs.topP.first() }.toDouble()
                 )
 
-                // 从设置读取推理后端（CPU/GPU）
                 val backendStr = kotlinx.coroutines.runBlocking { prefs.backend.first() }
                 val backend = when (backendStr.lowercase()) {
                     "gpu" -> Backend.GPU()
@@ -146,31 +164,32 @@ class LlmServerService : Service() {
                 }
                 Log.i(TAG, "推理后端: $backendStr → $backend")
 
-                // 检查是否已被中断
                 if (Thread.currentThread().isInterrupted) return@Thread
 
-                // 初始化引擎（initialize 是 suspend 函数，需 runBlocking 桥接）
-                val engine = LlmEngine(
+                // 从设置读取 KV Cache 容量（max_tokens），未设置则默认 4096
+                val maxNumTokens = kotlinx.coroutines.runBlocking { prefs.maxTokens.first() }
+
+                engine = LlmEngine(
                     modelPath, cacheDir,
                     visionBackend = Backend.GPU(),
                     audioBackend = Backend.CPU(),
-                    maxNumTokens = maxTokens
+                    maxNumTokens = maxNumTokens
                 )
+                // ★ 修复：立即追踪引擎引用，确保 stopAll() 能关闭未完成初始化的引擎
+                pendingEngine = engine
 
-                // ★ 关键修复：必须调用 initialize() 才能真正加载 JNI 引擎
                 kotlinx.coroutines.runBlocking {
-                    engine.initialize(backend = backend)
+                    engine!!.initialize(backend = backend)
                 }
                 llmEngine = engine
+                pendingEngine = null
                 Log.i(TAG, "引擎 initialize() 完成，模型已加载")
 
-                // 再次检查中断
                 if (Thread.currentThread().isInterrupted) return@Thread
 
                 conversationPool = ConversationPool(engine, idleTimeoutMs = timeoutMs, samplerConfig = samplerConfig)
                 conversationPool?.startAutoCleanup()
 
-                // 启动 HTTP 服务器，传入动态 samplerConfig 供应商以支持运行时设置变更
                 val server = OpenAIServer(port, engine, modelId, samplerConfig,
                     samplerConfigSupplier = {
                         val p = AppPreferences(this@LlmServerService)
@@ -194,13 +213,17 @@ class LlmServerService : Service() {
 
             } catch (e: InterruptedException) {
                 Log.i(TAG, "初始化线程被中断")
+                // 清理已部分创建的引擎
+                engine?.close()
+                pendingEngine = null
             } catch (e: Exception) {
                 Log.e(TAG, "初始化失败: ${e.message}", e)
                 isEngineReady = false
                 val errMsg = e.message ?: "未知错误"
                 setLastInitError(errMsg)
                 updateNotification("⚠️ 加载失败: $errMsg")
-                // ★ Bug修复：引擎初始化失败后停止服务，避免僵尸状态
+                engine?.close()
+                pendingEngine = null
                 stopAll()
                 stopSelf()
             } finally {
@@ -212,21 +235,30 @@ class LlmServerService : Service() {
     }
 
     private fun stopAll() {
+        // ★ 修复：先中断旧线程，join 等待结束，防止旧引擎泄漏
+        val oldThread = initThread
+        if (oldThread != null && oldThread.isAlive) {
+            oldThread.interrupt()
+            try {
+                oldThread.join(3000L) // 最多等 3 秒
+            } catch (_: InterruptedException) {}
+        }
         try {
-            isInitializing = false
-            // 修复：中断初始化线程，防止泄漏
-            initThread?.interrupt()
+            // ★ 修复：stopAll 不再重置 isInitializing，由调用方（initializeEngine/catch）管理
             initThread = null
             openAIServer?.stop()
             conversationPool?.shutdown()
             llmEngine?.close()
-            wakeLock?.release()
+            // ★ 修复：清理尚未完成 initialize() 的引擎（它们在 initThread 中作为局部变量）
+            pendingEngine?.close()
         } catch (e: Exception) {
             Log.w(TAG, "停止时异常: ${e.message}")
         } finally {
             openAIServer = null
             conversationPool = null
             llmEngine = null
+            pendingEngine = null
+            wakeLock?.release()
             wakeLock = null
             isEngineReady = false
         }

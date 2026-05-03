@@ -7,6 +7,7 @@ import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.SamplerConfig
+import com.rainyllm.app.data.StatsRepository
 import com.rainyllm.app.engine.LlmEngine
 import com.rainyllm.app.engine.TokenEstimator
 import kotlinx.coroutines.Dispatchers
@@ -45,6 +46,8 @@ class OpenAIServer(
 
     private var isRunning = false
     private val stats = ServerStats()
+    /** ★ 序列化锁：LiteRT-LM 只支持单一活跃会话，防止并发请求互相干扰 */
+    private val inferenceLock = java.util.concurrent.locks.ReentrantLock()
     @Volatile private var nextLogIndex = java.util.concurrent.atomic.AtomicInteger(0)
     private val requestLog = java.util.concurrent.CopyOnWriteArrayList<LogEntry>()
 
@@ -179,97 +182,161 @@ class OpenAIServer(
             return jsonResponse(Response.Status.BAD_REQUEST,
                 """{"error":{"message":"Empty request body"}}""")
 
-        // 暂存请求体，由 serve() 在 logRequest 之后写入日志
-        pendingRequestBody = bodyJson.take(8000)
+        pendingRequestBody = bodyJson
 
         val request = RequestParser.parseChatCompletionRequest(bodyJson)
         val isStream = request["stream"] as? Boolean ?: false
 
-        // 提取请求中的模型名（yuqing 别名直接映射为当前模型，响应沿用请求名）
         val requestModel = (request["model"] as? String)?.takeUnless { it.isBlank() }
         val responseModel = requestModel ?: modelId
 
-        // ★ 从请求中提取推理参数，若客户端传了则覆盖默认值
         val requestSamplerConfig = buildRequestSamplerConfig(request)
 
-        val systemPrompt = (request["messages"] as? List<Map<String, Any>>)
-            ?.firstOrNull { it["role"] == "system" }
+        // ── 解析 messages 数组 ──
+        val allMessages = (request["messages"] as? List<Map<String, Any>>) ?: emptyList()
+        if (allMessages.isEmpty())
+            return jsonResponse(Response.Status.BAD_REQUEST,
+                """{"error":{"message":"No messages provided"}}""")
+
+        // system 消息
+        val systemPrompt = allMessages
+            .firstOrNull { it["role"] == "system" }
             ?.get("content")?.toString()
 
-        // 构建完整 prompt：优先检查多模态 content
-        val userMessagesRaw = (request["messages"] as? List<Any>) ?: emptyList()
-        // 取最后一条 user 消息
-        val lastUserMsg = userMessagesRaw.lastOrNull {
-            (it as? Map<*, *>)?.get("role") == "user"
-        } as? Map<*, *>
+        // 非 system 消息
+        val nonSystem = allMessages.filter { it["role"] != "system" }
 
-        if (lastUserMsg == null) {
+        // 找到最后一条 user 消息的位置
+        val lastUserIdx = nonSystem.indexOfLast { it["role"] == "user" }
+        if (lastUserIdx < 0)
             return jsonResponse(Response.Status.BAD_REQUEST,
                 """{"error":{"message":"No user message found"}}""")
-        }
 
+        // 历史：最后一条 user 之前的所有消息 → initialMessages
+        val historyRaw = nonSystem.take(lastUserIdx)
+        // 当前 prompt：最后一条 user 消息
+        val currentMsg = nonSystem[lastUserIdx]
+
+        // ── 解析当前 prompt ──
         var prompt: String
         val multimodalContents = mutableListOf<Content>()
-
-        val contentField = lastUserMsg["content"]
+        val contentField = currentMsg["content"]
         when (contentField) {
             is List<*> -> {
-                // 多模态 content 数组
                 val textParts = mutableListOf<String>()
                 for (part in contentField) {
                     val partMap = part as? Map<*, *> ?: continue
                     when (partMap["type"]) {
-                        "text" -> {
-                            val txt = partMap["text"]?.toString() ?: ""
-                            if (txt.isNotBlank()) textParts.add(txt)
-                        }
+                        "text" -> { val t = partMap["text"]?.toString() ?: ""; if (t.isNotBlank()) textParts.add(t) }
                         "image_url" -> {
                             val imgUrl = (partMap["image_url"] as? Map<*, *>)?.get("url")?.toString()
                             if (imgUrl != null) {
                                 val bytes = decodeDataUrl(imgUrl)
                                 if (bytes != null) multimodalContents.add(Content.ImageBytes(bytes))
                                 else if (!imgUrl.startsWith("data:")) {
-                                    try {
-                                        val file = java.io.File(imgUrl)
-                                        if (file.exists()) multimodalContents.add(Content.ImageFile(imgUrl))
-                                    } catch (_: Exception) {}
+                                    try { val f = java.io.File(imgUrl); if (f.exists()) multimodalContents.add(Content.ImageFile(imgUrl)) } catch (_: Exception) {}
                                 }
                             }
                         }
                         "input_audio" -> {
-                            val audioData = partMap["input_audio"] as? Map<*, *>
-                            val audioB64 = audioData?.get("data")?.toString()
-                            if (audioB64 != null) {
-                                val bytes = Base64.decode(audioB64, Base64.DEFAULT)
-                                multimodalContents.add(Content.AudioBytes(bytes))
-                            }
+                            val d = (partMap["input_audio"] as? Map<*, *>)?.get("data")?.toString()
+                            if (d != null) multimodalContents.add(Content.AudioBytes(Base64.decode(d, Base64.DEFAULT)))
                         }
                     }
                 }
-                prompt = textParts.joinToString("\n")
-                if (prompt.isBlank()) prompt = "请描述以下内容"
+                prompt = textParts.joinToString("\n").ifBlank { "请描述以下内容" }
                 multimodalContents.add(Content.Text(prompt))
             }
-            is String -> {
-                prompt = contentField
-            }
-            else -> {
-                prompt = contentField?.toString() ?: ""
-            }
+            is String -> prompt = contentField
+            else -> prompt = contentField?.toString() ?: ""
         }
+
+        // ── 构建 initialMessages ──
+        val kvMax = llmEngine.maxNumTokens ?: 4096
+        val historyLm = try {
+            buildHistoryMessages(historyRaw, systemPrompt, kvMax)
+        } catch (e: ContextOverflowException) {
+            return jsonResponse(Response.Status.BAD_REQUEST,
+                """{"error":{"message":"${e.message?.replace("\"", "\\\"")}"}}""")
+        }
+
         val promptTokens = if (multimodalContents.size > 1) {
-                val counts = TokenEstimator.countMultimodal(multimodalContents)
-                TokenEstimator.estimateMultimodalPromptTokens(prompt, counts)
-            } else {
-                TokenEstimator.estimatePromptTokens(prompt)
-            }
+            val counts = TokenEstimator.countMultimodal(multimodalContents)
+            TokenEstimator.estimateMultimodalPromptTokens(prompt, counts)
+        } else {
+            TokenEstimator.estimatePromptTokens(prompt)
+        }
 
         return if (isStream) {
-            handleStreamResponse(prompt, systemPrompt, promptTokens, multimodalContents, responseModel, requestSamplerConfig)
+            handleStreamResponse(prompt, systemPrompt, promptTokens, multimodalContents,
+                responseModel, requestSamplerConfig, historyLm)
         } else {
-            handleSyncResponse(prompt, systemPrompt, promptTokens, multimodalContents, responseModel, requestSamplerConfig)
+            handleSyncResponse(prompt, systemPrompt, promptTokens, multimodalContents,
+                responseModel, requestSamplerConfig, historyLm)
         }
     }
+
+    /** 将 client 发来的历史消息转为 LiteRT-LM Message */
+    private fun buildHistoryMessages(
+        history: List<Map<String, Any>>,
+        systemPrompt: String?,
+        kvMaxTokens: Int
+    ): List<com.google.ai.edge.litertlm.Message> {
+        if (history.isEmpty()) return emptyList()
+
+        // 第一遍：收集 assistant 消息中的 tool_call id→name 映射
+        val toolNameMap = mutableMapOf<String, String>()
+        for (msg in history) {
+            if (msg["role"] == "assistant") {
+                val toolCalls = msg["tool_calls"] as? List<Map<String, Any>>
+                if (toolCalls != null) {
+                    for (tc in toolCalls) {
+                        val id = tc["id"]?.toString() ?: continue
+                        val name = (tc["function"] as? Map<*, *>)?.get("name")?.toString() ?: continue
+                        toolNameMap[id] = name
+                    }
+                }
+            }
+        }
+
+        // 第二遍：按序转为 LiteRT-LM Message
+        val allLm = history.mapNotNull { msg ->
+            val role = msg["role"]?.toString() ?: return@mapNotNull null
+            when (role) {
+                "user" -> {
+                    val content = msg["content"]?.toString() ?: return@mapNotNull null
+                    com.google.ai.edge.litertlm.Message.user(content)
+                }
+                "assistant" -> {
+                    val content = msg["content"]?.toString() ?: ""
+                    com.google.ai.edge.litertlm.Message.model(content)
+                }
+                "tool" -> {
+                    val toolCallId = msg["tool_call_id"]?.toString() ?: return@mapNotNull null
+                    val toolName = toolNameMap[toolCallId] ?: toolCallId
+                    val content = msg["content"]?.toString() ?: return@mapNotNull null
+                    val response = Content.ToolResponse(toolName, content)
+                    com.google.ai.edge.litertlm.Message.tool(Contents.of(listOf(response)))
+                }
+                else -> null
+            }
+        }
+
+        // 估算总 token 数，超限直接报错
+        var totalEst = systemPrompt?.let { TokenEstimator.estimatePromptTokens(it) } ?: 0
+        for (m in allLm) totalEst += TokenEstimator.estimatePromptTokens(m.toString())
+
+        if (totalEst > kvMaxTokens) {
+            throw ContextOverflowException(
+                "输入上下文过大：${"%.1f".format(totalEst / 1000.0)}K tokens，超过 KV Cache 上限 ${"%.1f".format(kvMaxTokens / 1000.0)}K。" +
+                "请在设置中增大 max_tokens 或缩短对话历史。"
+            )
+        }
+
+        return allLm
+    }
+
+    private class ContextOverflowException(message: String) : Exception(message)
 
     /**
      * 从请求参数构建 SamplerConfig，若客户端传了 temperature/top_p 则覆盖默认值。
@@ -297,13 +364,16 @@ private fun handleSyncResponse(
         promptTokens: Int,
         multimodalContents: List<Content>,
         responseModel: String = modelId,
-        requestSamplerConfig: SamplerConfig? = null
+        requestSamplerConfig: SamplerConfig? = null,
+        historyMessages: List<com.google.ai.edge.litertlm.Message> = emptyList()
     ): Response {
+        val syncStart = System.currentTimeMillis()
         return try {
             val sampler = requestSamplerConfig ?: samplerConfigSupplier?.invoke() ?: defaultSamplerConfig
             val config = ConversationConfig(
                 systemInstruction = if (systemPrompt != null) Contents.of(systemPrompt) else null,
-                samplerConfig = sampler
+                samplerConfig = sampler,
+                initialMessages = historyMessages
             )
             val isMultimodal = multimodalContents.size > 1
             val result: String
@@ -311,17 +381,22 @@ private fun handleSyncResponse(
             val actualCompletionTokens: Int
 
             runBlocking(Dispatchers.IO) {
-                llmEngine.createConversation(config).use { conversation ->
-                    val responseMsg = if (isMultimodal) {
-                        conversation.sendMessage(Contents.of(multimodalContents))
-                    } else {
-                        conversation.sendMessage(prompt)
-                    }
-                    result = responseMsg.toString()
+                inferenceLock.lock()
+                try {
+                    llmEngine.createConversation(config).use { conversation ->
+                        val responseMsg = if (isMultimodal) {
+                            conversation.sendMessage(Contents.of(multimodalContents))
+                        } else {
+                            conversation.sendMessage(prompt)
+                        }
+                        result = responseMsg.toString()
 
-                    // 尝试从引擎获取真实 token 计数（需要 benchmark 模式启用）
-                    actualPromptTokens = getBenchmarkTokenCount(conversation) { it.lastPrefillTokenCount }
-                    actualCompletionTokens = getBenchmarkTokenCount(conversation) { it.lastDecodeTokenCount }
+                        // 尝试从引擎获取真实 token 计数（需要 benchmark 模式启用）
+                        actualPromptTokens = getBenchmarkTokenCount(conversation) { it.lastPrefillTokenCount }
+                        actualCompletionTokens = getBenchmarkTokenCount(conversation) { it.lastDecodeTokenCount }
+                    }
+                } finally {
+                    inferenceLock.unlock()
                 }
             }
 
@@ -345,8 +420,18 @@ private fun handleSyncResponse(
                 completionTokens = finalCompletionTokens
             )
 
+            val durationMs = System.currentTimeMillis() - syncStart
             stats.addRequest(finalPromptTokens, finalCompletionTokens)
-            pendingResponseSummary = responseJson.take(500)
+            StatsRepository.instance?.addRecord(
+                StatsRepository.InferenceRecord(
+                    timestamp = System.currentTimeMillis(),
+                    model = responseModel,
+                    promptTokens = finalPromptTokens,
+                    completionTokens = finalCompletionTokens,
+                    durationMs = durationMs
+                )
+            )
+            pendingResponseSummary = responseJson
             pendingPromptTokens = finalPromptTokens
             pendingCompletionTokens = finalCompletionTokens
             jsonResponse(Response.Status.OK, responseJson)
@@ -367,12 +452,14 @@ private fun handleSyncResponse(
         promptTokens: Int,
         multimodalContents: List<Content>,
         responseModel: String = modelId,
-        requestSamplerConfig: SamplerConfig? = null
+        requestSamplerConfig: SamplerConfig? = null,
+        historyMessages: List<com.google.ai.edge.litertlm.Message> = emptyList()
     ): Response {
         val sampler = requestSamplerConfig ?: samplerConfigSupplier?.invoke() ?: defaultSamplerConfig
         val config = ConversationConfig(
             systemInstruction = if (systemPrompt != null) Contents.of(systemPrompt) else null,
-            samplerConfig = sampler
+            samplerConfig = sampler,
+            initialMessages = historyMessages
         )
         val conversation = llmEngine.createConversation(config)
         val isMultimodal = multimodalContents.size > 1
@@ -409,49 +496,63 @@ private fun handleSyncResponse(
                     writeSseFrame(outputStream,
                         SseFormatter.buildSseChunk(id, responseModel, created, "assistant", null))
 
-                    runBlocking(Dispatchers.IO) {
-                        val flow = if (isMultimodal) {
-                            llmEngine.generateResponseAsync(conversation, Contents.of(multimodalContents))
-                        } else {
-                            llmEngine.generateResponseAsync(conversation, prompt)
-                        }
-                        flow.collect { token ->
-                            totalResponseText += token
-                            writeSseFrame(outputStream,
-                                SseFormatter.buildSseChunk(id, responseModel, created, null, token))
-                        }
-                    }
-
-                    // 尝试从引擎获取真实 token 计数
-                    val actualDecode = getBenchmarkTokenCount(conversation) { it.lastDecodeTokenCount }
-                    val actualPrefill = getBenchmarkTokenCount(conversation) { it.lastPrefillTokenCount }
-                    // 修复：回退方案改用 TokenEstimator 而非简单计数器
-                    val finalCompletionTokens = if (actualDecode > 0)
-                        actualDecode
-                    else
-                        TokenEstimator.estimateCompletionTokens(totalResponseText)
-                    // promptTokens 已在 handleChatCompletion 中预计算（含多模态），直接用于回退
-                    val finalPromptTokens = if (actualPrefill > 0)
-                        actualPrefill
-                    else
-                        promptTokens
-
-                    // 最后 chunk：done（含 usage）
-                    writeSseFrame(outputStream,
-                        SseFormatter.buildSseDone(id, responseModel, created, finalPromptTokens, finalCompletionTokens))
-
-                    stats.addRequest(finalPromptTokens, finalCompletionTokens)
-                    val elapsed = System.currentTimeMillis() - streamStart
-                    if (sseLogIndex >= 0) {
-                        val summary = buildString {
-                            append("SSE 流式 · ${finalCompletionTokens} tokens")
-                            if (totalResponseText.isNotEmpty()) {
-                                append("\n\n")
-                                append(totalResponseText.take(8000))
+                    inferenceLock.lock()
+                    try {
+                        runBlocking(Dispatchers.IO) {
+                            val flow = if (isMultimodal) {
+                                llmEngine.generateResponseAsync(conversation, Contents.of(multimodalContents))
+                            } else {
+                                llmEngine.generateResponseAsync(conversation, prompt)
+                            }
+                            flow.collect { token ->
+                                totalResponseText += token
+                                writeSseFrame(outputStream,
+                                    SseFormatter.buildSseChunk(id, responseModel, created, null, token))
                             }
                         }
-                        setLogEntryAt(sseLogIndex, summary, elapsed,
-                                finalPromptTokens, finalCompletionTokens)
+
+                        // 尝试从引擎获取真实 token 计数
+                        val actualDecode = getBenchmarkTokenCount(conversation) { it.lastDecodeTokenCount }
+                        val actualPrefill = getBenchmarkTokenCount(conversation) { it.lastPrefillTokenCount }
+                        // 修复：回退方案改用 TokenEstimator 而非简单计数器
+                        val finalCompletionTokens = if (actualDecode > 0)
+                            actualDecode
+                        else
+                            TokenEstimator.estimateCompletionTokens(totalResponseText)
+                        // promptTokens 已在 handleChatCompletion 中预计算（含多模态），直接用于回退
+                        val finalPromptTokens = if (actualPrefill > 0)
+                            actualPrefill
+                        else
+                            promptTokens
+
+                        // 最后 chunk：done（含 usage）
+                        writeSseFrame(outputStream,
+                            SseFormatter.buildSseDone(id, responseModel, created, finalPromptTokens, finalCompletionTokens))
+
+                        stats.addRequest(finalPromptTokens, finalCompletionTokens)
+                        val elapsed = System.currentTimeMillis() - streamStart
+                        StatsRepository.instance?.addRecord(
+                            StatsRepository.InferenceRecord(
+                                timestamp = System.currentTimeMillis(),
+                                model = responseModel,
+                                promptTokens = finalPromptTokens,
+                                completionTokens = finalCompletionTokens,
+                                durationMs = elapsed
+                            )
+                        )
+                        if (sseLogIndex >= 0) {
+                            val summary = buildString {
+                                append("SSE 流式 · ${finalCompletionTokens} tokens")
+                                if (totalResponseText.isNotEmpty()) {
+                                    append("\n\n")
+                                    append(totalResponseText)
+                                }
+                            }
+                            setLogEntryAt(sseLogIndex, summary, elapsed,
+                                    finalPromptTokens, finalCompletionTokens)
+                        }
+                    } finally {
+                        inferenceLock.unlock()
                     }
                 } catch (e: IOException) {
                     Log.d(TAG, "SSE 客户端断开连接")
@@ -508,11 +609,10 @@ private fun handleSyncResponse(
         return try {
             val cl = session.headers["content-length"]?.toIntOrNull() ?: 0
             if (cl > 0) {
-                val bytes = session.inputStream.readNBytes(cl.coerceAtMost(1_048_576))
+                val bytes = session.inputStream.readNBytes(cl)
                 String(bytes, Charsets.UTF_8)
             } else {
-                // 没有 Content-Length，读取所有可用字节（最多 1MB）
-                val bytes = session.inputStream.readNBytes(1_048_576)
+                val bytes = session.inputStream.readBytes()
                 if (bytes.isEmpty()) "" else String(bytes, Charsets.UTF_8)
             }
         } catch (e: Exception) {
@@ -605,7 +705,7 @@ private fun handleSyncResponse(
     ) {
         if (index >= 0 && index < requestLog.size) {
             requestLog[index] = requestLog[index].copy(
-                responseSummary = summary.take(500),
+                responseSummary = summary,
                 elapsedMs = elapsedMs,
                 promptTokens = promptTokens,
                 completionTokens = completionTokens

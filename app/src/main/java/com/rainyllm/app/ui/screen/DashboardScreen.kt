@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.*
@@ -106,6 +107,9 @@ fun DashboardScreen(isVisible: Boolean = true) {
             if (isServerRunning || initError != null) {
                 isStarting = false
             }
+            // 统计摘要 — 从持久化仓库读取（跨重启保留，服务启停均显示）
+            statsSummary = StatsRepository.instance?.getSummary()
+                ?: StatsRepository.StatsSummary()
             if (isServerRunning && server != null) {
                 uptimeSec = (System.currentTimeMillis() - server.getStats().startTime) / 1000
                 debugText = server.getDebugInfo()
@@ -169,18 +173,9 @@ fun DashboardScreen(isVisible: Boolean = true) {
                         logFile.writeText(arr.toString())
                     } catch (_: Exception) {}
                 }
-                // 统计摘要
-                val s = server.getStats()
-                // 从请求日志计算平均耗时
-                val logEntries = server.getRequestLog()
-                val avgMs = if (logEntries.isNotEmpty())
-                    logEntries.map { it.elapsedMs }.average().toLong() else 0L
-                statsSummary = StatsRepository.StatsSummary(
-                    totalRequests = s.totalRequests,
-                    totalPromptTokens = s.totalPromptTokens,
-                    totalCompletionTokens = s.totalCompletionTokens,
-                    avgDurationMs = avgMs
-                )
+                // 统计摘要 — 从持久化仓库读取（跨重启保留）
+                statsSummary = StatsRepository.instance?.getSummary()
+                    ?: StatsRepository.StatsSummary()
             }
             kotlinx.coroutines.delay(1000L)
         }
@@ -305,10 +300,8 @@ fun DashboardScreen(isVisible: Boolean = true) {
             }
         }
 
-        // 统计摘要
-        if (statsSummary.totalRequests > 0) {
-            StatsSummaryCard(statsSummary)
-        }
+        // 统计摘要 — 常驻显示
+        StatsSummaryCard(statsSummary)
 
         // Debug 诊断面板
         DebugCard(
@@ -354,18 +347,55 @@ fun DashboardScreen(isVisible: Boolean = true) {
 
 @Composable
 private fun StatsSummaryCard(summary: StatsRepository.StatsSummary) {
+    var showResetConfirm by remember { mutableStateOf(false) }
     Card(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly
-        ) {
-            StatItem("总请求", summary.totalRequests.toString())
-            StatItem("Prompt Tokens", formatNumber(summary.totalPromptTokens))
-            StatItem("Comp Tokens", formatNumber(summary.totalCompletionTokens))
-            StatItem("平均耗时", "${summary.avgDurationMs}ms")
+        Column {
+            // 标题行 + 重置按钮
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 14.dp, end = 4.dp, top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("📊 累计统计",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f))
+                if (summary.totalRequests > 0) {
+                    IconButton(onClick = { showResetConfirm = true }, modifier = Modifier.size(24.dp)) {
+                        Icon(Icons.Default.Refresh,
+                            contentDescription = "重置统计",
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 14.dp, end = 14.dp, bottom = 12.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                StatItem("总请求", summary.totalRequests.toString())
+                StatItem("Prompt Tokens", formatNumber(summary.totalPromptTokens))
+                StatItem("Comp Tokens", formatNumber(summary.totalCompletionTokens))
+                StatItem("平均耗时", "${summary.avgDurationMs}ms")
+            }
         }
+    }
+    if (showResetConfirm) {
+        AlertDialog(
+            onDismissRequest = { showResetConfirm = false },
+            title = { Text("重置统计") },
+            text = { Text("确定要清空所有历史统计数据吗？\n此操作不可撤销。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    StatsRepository.instance?.clear()
+                    showResetConfirm = false
+                }) { Text("清空", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetConfirm = false }) { Text("取消") }
+            }
+        )
     }
 }
 

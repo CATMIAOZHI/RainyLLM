@@ -1,5 +1,8 @@
 package com.rainyllm.app.ui.component
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -11,6 +14,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ListAlt
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.*
@@ -18,6 +22,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -314,6 +319,15 @@ private fun LogEntryCard(entry: LogEntry, onClick: () -> Unit) {
 
 @Composable
 private fun LogDetailDialog(entry: LogEntry, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    var requestCopied by remember { mutableStateOf(false) }
+    var responseCopied by remember { mutableStateOf(false) }
+
+    fun copyToClipboard(text: String) {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        cm.setPrimaryClip(ClipData.newPlainText("log", text))
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -342,10 +356,8 @@ private fun LogDetailDialog(entry: LogEntry, onDismiss: () -> Unit) {
         },
         text = {
             Column(
-                modifier = Modifier
-                    .verticalScroll(rememberScrollState())
-                    .fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 // 基本信息
                 DetailSection("📌 基本信息") {
@@ -354,36 +366,37 @@ private fun LogDetailDialog(entry: LogEntry, onDismiss: () -> Unit) {
                     DetailRow("路径", entry.path)
                     DetailRow("状态码", entry.statusCode.toString())
                     DetailRow("耗时", "${entry.elapsedMs}ms")
+                    if (entry.promptTokens > 0 || entry.completionTokens > 0) {
+                        DetailRow("Tokens", "⬆${entry.promptTokens} ⬇${entry.completionTokens}")
+                    }
                 }
 
-                // 请求体
+                // 请求体 — 独立可滚动块 + 复制按钮
                 if (entry.requestBody.isNotBlank()) {
-                    DetailSection("📥 请求体 (${entry.requestBody.length} 字符)") {
-                        SelectionContainer {
-                            Text(
-                                text = entry.requestBody,
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
+                    ScrollableDetailBlock(
+                        title = "📥 请求体 (${entry.requestBody.length} 字符)",
+                        content = entry.requestBody,
+                        copied = requestCopied,
+                        onCopy = {
+                            copyToClipboard(entry.requestBody)
+                            requestCopied = true
+                        },
+                        onCopiedReset = { requestCopied = false }
+                    )
                 }
 
-                // 响应摘要
+                // 响应摘要 — 独立可滚动块 + 复制按钮
                 if (entry.responseSummary.isNotBlank()) {
-                    DetailSection("📤 响应摘要") {
-                        SelectionContainer {
-                            Text(
-                                text = entry.responseSummary,
-                                style = MaterialTheme.typography.bodySmall,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
+                    ScrollableDetailBlock(
+                        title = "📤 响应摘要 (${entry.responseSummary.length} 字符)",
+                        content = entry.responseSummary,
+                        copied = responseCopied,
+                        onCopy = {
+                            copyToClipboard(entry.responseSummary)
+                            responseCopied = true
+                        },
+                        onCopiedReset = { responseCopied = false }
+                    )
                 }
             }
         },
@@ -391,6 +404,80 @@ private fun LogDetailDialog(entry: LogEntry, onDismiss: () -> Unit) {
             TextButton(onClick = onDismiss) { Text("关闭") }
         }
     )
+}
+
+@Composable
+private fun ScrollableDetailBlock(
+    title: String,
+    content: String,
+    copied: Boolean,
+    onCopy: () -> Unit,
+    onCopiedReset: () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+        )
+    ) {
+        Column {
+            // 标题行 + 复制按钮
+            Row(
+                modifier = Modifier.fillMaxWidth()
+                    .padding(start = 10.dp, end = 2.dp, top = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f)
+                )
+                IconButton(
+                    onClick = onCopy,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        Icons.Default.ContentCopy,
+                        contentDescription = "复制",
+                        modifier = Modifier.size(14.dp),
+                        tint = if (copied)
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                    )
+                }
+            }
+            if (copied) {
+                Text(
+                    "✓ 已复制",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(horizontal = 10.dp)
+                )
+            }
+            // 可滚动的正文区域
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 200.dp)
+                    .padding(horizontal = 10.dp)
+            ) {
+                val scrollState = rememberScrollState()
+                SelectionContainer {
+                    Text(
+                        text = content,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.verticalScroll(scrollState)
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
 }
 
 @Composable

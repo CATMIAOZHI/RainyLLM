@@ -26,6 +26,7 @@ class LlmEngine(
     }
 
     private var engine: Engine? = null
+    private val engineLock = Any()
 
     val isInitialized: Boolean get() = engine != null
 
@@ -41,16 +42,7 @@ class LlmEngine(
                     throw EngineInitException("模型文件不存在: $modelPath")
                 }
 
-                // 在 proot/非标准环境下，NativeLibraryLoader 可能找错 ABI 路径。
-                // APK 中已有 lib/arm64-v8a/liblitertlm_jni.so，手动触发加载。
-                try {
-                    System.loadLibrary("litertlm_jni")
-                    Log.i(TAG, "原生库 litertlm_jni 加载成功")
-                } catch (e: UnsatisfiedLinkError) {
-                    Log.w(TAG, "System.loadLibrary 失败，依赖 NativeLibraryLoader: ${e.message}")
-                }
-
-                Log.i(TAG, "开始初始化引擎... modelPath=$modelPath, backend=$backend")
+                Log.i(TAG, "开始初始化引擎... modelPath=$modelPath, backend=$backend, maxNumTokens=$maxNumTokens")
                 val config = EngineConfig(
                     modelPath = modelPath,
                     backend = backend,
@@ -77,6 +69,7 @@ class LlmEngine(
      * 创建新对话
      * @param config 对话配置（可为 null，使用默认配置）
      */
+    @Synchronized
     fun createConversation(config: ConversationConfig? = null): Conversation {
         return requireEngine().createConversation(config ?: ConversationConfig())
     }
@@ -147,6 +140,7 @@ class LlmEngine(
 
     fun getRawEngine(): Engine = requireEngine()
 
+    @Synchronized
     fun close() {
         try {
             engine?.close()

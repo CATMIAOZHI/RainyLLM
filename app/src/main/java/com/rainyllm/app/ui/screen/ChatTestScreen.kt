@@ -12,6 +12,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -43,6 +44,7 @@ import com.rainyllm.app.engine.InferenceException
 import com.rainyllm.app.engine.LlmEngine
 import com.rainyllm.app.model.ModelRepository
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 
 // ── 数据模型 ───────────────────────────────────────────
 
@@ -172,11 +174,13 @@ fun ChatTestScreen(
                             "gpu" -> com.google.ai.edge.litertlm.Backend.GPU()
                             else -> com.google.ai.edge.litertlm.Backend.CPU()
                         }
+                        // ★ 修复：直接从 DataStore 读取 maxTokens，避免 state 变量竞态
+                        val effectiveMaxTokens = prefs.maxTokens.first()
                         val newEngine = LlmEngine(
                             effectiveModelPath, effectiveCacheDir,
                             visionBackend = com.google.ai.edge.litertlm.Backend.CPU(),
                             audioBackend = com.google.ai.edge.litertlm.Backend.CPU(),
-                            maxNumTokens = maxTokens
+                            maxNumTokens = effectiveMaxTokens
                         )
                         newEngine.initialize(backend = engineBackend)
                         engine = newEngine
@@ -777,9 +781,11 @@ fun MessageBubble(message: ChatMessage) {
                     Text("🎵 音频附件", style = MaterialTheme.typography.labelSmall, color = contentColor)
                     Spacer(Modifier.height(4.dp))
                 }
-                if (message.content.isNotEmpty()) {
-                    Text(message.content, color = contentColor, style = MaterialTheme.typography.bodyMedium)
-                }
+                    if (message.content.isNotEmpty()) {
+                            SelectionContainer {
+                                Text(message.content, color = contentColor, style = MaterialTheme.typography.bodyMedium)
+                            }
+                        }
                 // 用户消息 — 推理进行中的实时计时器
                 if (isUser && message.elapsedMs != null) {
                     Spacer(Modifier.height(4.dp))
