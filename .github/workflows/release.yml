@@ -25,6 +25,12 @@ jobs:
       - name: Decode Keystore
         run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.jks
 
+      - name: Set Signing Credentials
+        run: |
+          echo "RELEASE_STORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+          echo "RELEASE_KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
+          echo "RELEASE_KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
+
       - run: chmod +x gradlew
 
       - name: Fix Gradle Wrapper URL
