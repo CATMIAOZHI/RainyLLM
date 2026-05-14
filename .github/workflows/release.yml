@@ -40,7 +40,7 @@ jobs:
       - run: ./gradlew assembleRelease
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/release/app-release.apk "RainyLLM-${GITHUB_REF#refs/tags/}.apk"
+        run: cp app/build/outputs/apk/release/app-release.apk "RainyLLM-${{ github.ref_name }}.apk"
 
       - name: Create Release & Upload
         uses: softprops/action-gh-release@v2
