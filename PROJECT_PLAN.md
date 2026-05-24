@@ -102,31 +102,33 @@ RainyLLM/
 │   ├── src/main/java/com/rainyllm/app/
 │   │   │
 │   │   ├── RainyLLMApp.kt                    ← Application 类
+│   │   ├── MainActivity.kt                   ← 唯一 Activity
 │   │   │
 │   │   ├── ui/
-│   │   │   ├── MainActivity.kt               ← 唯一 Activity
+│   │   │   ├── navigation/
+│   │   │   │   └── Screen.kt                 ← 底部导航路由定义（5 标签页）
 │   │   │   ├── screen/
 │   │   │   │   ├── DashboardScreen.kt         ← 主控台：服务状态+开关+统计
 │   │   │   │   ├── ModelManagerScreen.kt      ← 模型下载/切换/删除
 │   │   │   │   ├── ChatTestScreen.kt          ← 内置聊天测试页
+│   │   │   │   ├── PerformanceScreen.kt       ← 性能监控页
 │   │   │   │   └── SettingsScreen.kt          ← 端口/后端/采样参数设置
 │   │   │   ├── component/
 │   │   │   │   ├── ServerStatusCard.kt        ← 服务状态卡片
 │   │   │   │   ├── ModelDownloadCard.kt       ← 下载进度卡片
 │   │   │   │   ├── TokenStatsChart.kt         ← 推理统计图表
-│   │   │   │   └── LogViewer.kt              ← 请求日志
+│   │   │   │   ├── LogViewer.kt              ← 请求日志
+│   │   │   │   └── DebugCard.kt              ← 诊断面板
 │   │   │   └── theme/
 │   │   │       ├── Color.kt / Theme.kt / Type.kt
 │   │   │
 │   │   ├── server/
-│   │   │   ├── OpenAIServer.kt               ← NanoHTTPd 服务器主体
-│   │   │   ├── ChatCompletionHandler.kt      ← /v1/chat/completions 处理
-│   │   │   ├── SseFormatter.kt               ← SSE 流式格式化
+│   │   │   ├── OpenAIServer.kt               ← NanoHTTPd 服务器（路由/CORS/SSE/多模态/tool calling）
+│   │   │   ├── SseFormatter.kt               ← SSE 数据帧格式化
 │   │   │   └── RequestParser.kt              ← OpenAI 请求体解析
 │   │   │
 │   │   ├── engine/
-│   │   │   ├── LlmEngine.kt                  ← LiteRT-LM Engine 封装
-│   │   │   ├── ConversationPool.kt           ← 多会话管理
+│   │   │   ├── LlmEngine.kt                  ← LiteRT-LM Engine 封装（初始化/同步/流式推理）
 │   │   │   └── TokenEstimator.kt             ← Token 计数估算
 │   │   │
 │   │   ├── model/
@@ -136,7 +138,8 @@ RainyLLM/
 │   │   │   └── ModelValidator.kt             ← SHA256 校验
 │   │   │
 │   │   ├── service/
-│   │   │   └── LlmServerService.kt           ← Foreground Service 保活
+│   │   │   ├── LlmServerService.kt           ← Foreground Service（引擎+服务器保活）
+│   │   │   └── KeepAliveService.kt           ← 通知栏保活服务
 │   │   │
 │   │   └── data/
 │   │       ├── AppPreferences.kt              ← DataStore 偏好存储
@@ -150,7 +153,7 @@ RainyLLM/
 └── README.md
 ```
 
-**预估规模**：约 26 个 Kotlin 源文件，~3800 行代码。
+**预估规模**：约 26 个 Kotlin 源文件，~5500 行代码。
 
 ---
 

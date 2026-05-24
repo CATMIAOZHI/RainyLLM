@@ -90,7 +90,6 @@ RainyLLM/
 │   │
 │   ├── engine/                          # 推理引擎封装
 │   │   ├── LlmEngine.kt                 # LiteRT-LM Engine 封装（初始化/同步/流式推理）
-│   │   ├── ConversationPool.kt          # 多会话管理（超时自动清理）
 │   │   └── TokenEstimator.kt            # Token 计数估算
 │   │
 │   ├── server/                          # HTTP API 服务
