@@ -139,7 +139,9 @@ RainyLLM/
 │   │   │
 │   │   ├── service/
 │   │   │   ├── LlmServerService.kt           ← Foreground Service（引擎+服务器保活）
-│   │   │   └── KeepAliveService.kt           ← 通知栏保活服务
+│   │   │   ├── KeepAliveService.kt           ← 通知栏保活服务
+│   │   │   ├── FloatingWindowManager.kt      ← 全局悬浮窗管理器
+│   │   │   └── NotificationActionReceiver.kt ← 通知栏按钮广播接收器
 │   │   │
 │   │   └── data/
 │   │       ├── AppPreferences.kt              ← DataStore 偏好存储
@@ -314,6 +316,7 @@ LiteRT-LM 的 `sendMessageAsync()` 返回 `Flow<Message>`，天然适合 SSE 流
 <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 <uses-permission android:name="android.permission.WAKE_LOCK" />
 <uses-permission android:name="android.permission.INTERNET" />
+<uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />  <!-- 悬浮窗 -->
 
 <application>
     <!-- GPU 加速依赖 -->
@@ -323,6 +326,13 @@ LiteRT-LM 的 `sendMessageAsync()` 返回 `Flow<Message>`，天然适合 SSE 流
     <service
         android:name=".service.LlmServerService"
         android:foregroundServiceType="specialUse"
+        android:exported="false" />
+    <service
+        android:name=".service.KeepAliveService"
+        android:foregroundServiceType="specialUse"
+        android:exported="false" />
+    <receiver
+        android:name=".service.NotificationActionReceiver"
         android:exported="false" />
 </application>
 ```

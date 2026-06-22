@@ -19,7 +19,8 @@
 | 🎛️ **GPU 加速** | CPU / GPU 后端可切换，GPU prefill 可达 3808 tk/s |
 | 🔒 **纯本地 · 零联网** | 127.0.0.1 绑定，不暴露到局域网，隐私安全 |
 | 📊 **实时统计** | 请求日志、Token 用量图表、引擎诊断面板 |
-| 🎨 **Material Design 3** | Jetpack Compose 构建，科技蓝紫色调 |
+| 🪟 **实时悬浮窗** | 可拖动/最小化的全局悬浮窗，粉色主题，通知栏快捷控制 |
+| 🎨 **Material Design 3** | Jetpack Compose 构建，元气猫系粉色主题 |
 | 🔌 **后台保活** | Foreground Service + WakeLock + 通知栏常驻 |
 
 ---
@@ -105,7 +106,9 @@ RainyLLM/
 │   │
 │   ├── service/                         # 后台服务
 │   │   ├── LlmServerService.kt          # Foreground Service（引擎+服务器保活）
-│   │   └── KeepAliveService.kt          # 通知栏保活服务
+│   │   ├── KeepAliveService.kt          # 通知栏保活服务
+│   │   ├── FloatingWindowManager.kt     # 全局悬浮窗管理器
+│   │   └── NotificationActionReceiver.kt# 通知栏按钮广播接收器
 │   │
 │   ├── data/                            # 数据层
 │   │   ├── AppPreferences.kt            # DataStore 偏好存储
