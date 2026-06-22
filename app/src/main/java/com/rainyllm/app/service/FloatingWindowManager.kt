@@ -581,34 +581,52 @@ object FloatingWindowManager {
     // ── 拖动 ────────────────────────────────────────────
 
     private fun setupDrag(view: View, params: WindowManager.LayoutParams) {
-        var ix = 0; var iy = 0
-        var tx = 0f; var ty = 0f
-        var dragging = false
+    var ix = 0; var iy = 0
+    var tx = 0f; var ty = 0f
+    var dragging = false
 
-        view.setOnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    ix = params.x; iy = params.y
-                    tx = event.rawX; ty = event.rawY
-                    dragging = false; false
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    val dx = event.rawX - tx; val dy = event.rawY - ty
-                    if (!dragging && (Math.abs(dx) > touchSlop || Math.abs(dy) > touchSlop))
-                        dragging = true
-                    if (dragging) {
-                        params.x = ix + dx.toInt(); params.y = iy + dy.toInt()
-                        try { windowManager?.updateViewLayout(view, params) } catch (_: Exception) {}
-                        true
-                    } else false
-                }
-                MotionEvent.ACTION_UP -> {
-                    if (dragging) { dragging = false; true } else false
-                }
-                else -> false
+    // 屏幕边界（px），减去状态栏和导航栏
+    val ctx = RainyLLMApp.instance
+    val dm = ctx.resources.displayMetrics
+    val screenW = dm.widthPixels
+    val screenH = dm.heightPixels
+    val density = dm.density
+    val margin = (8 * density).toInt()  // 留一点边距
+
+    // 底部：为导航栏/手势条留出空间
+    val navBarH = run {
+        val resid = ctx.resources.getIdentifier("navigation_bar_height", "dimen", "android")
+        if (resid > 0) ctx.resources.getDimensionPixelSize(resid) else (48 * density).toInt()
+    }
+
+    view.setOnTouchListener { _, event ->
+        when (event.action) {
+            MotionEvent.ACTION_DOWN -> {
+                ix = params.x; iy = params.y
+                tx = event.rawX; ty = event.rawY
+                dragging = false; false
             }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = event.rawX - tx; val dy = event.rawY - ty
+                if (!dragging && (Math.abs(dx) > touchSlop || Math.abs(dy) > touchSlop))
+                    dragging = true
+                if (dragging) {
+                    val newX = ix + dx.toInt()
+                    val newY = iy + dy.toInt()
+                    // 边界限制：上可覆盖状态栏，下避开导航栏
+                    params.x = newX.coerceIn(-margin, screenW - params.width + margin)
+                    params.y = newY.coerceIn(margin, screenH - params.height - navBarH)
+                    try { windowManager?.updateViewLayout(view, params) } catch (_: Exception) {}
+                }
+                true
+            }
+            MotionEvent.ACTION_UP -> {
+                if (dragging) { dragging = false; true } else false
+            }
+            else -> false
         }
     }
+}
 
     // ── 格式化 ──────────────────────────────────────────
 
