@@ -5,7 +5,9 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.runBlocking
 
 /**
  * 应用偏好设置（DataStore 持久化）
@@ -26,6 +28,7 @@ class AppPreferences(private val context: Context) {
         val KEY_SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
         val KEY_KEEP_ALIVE = booleanPreferencesKey("keep_alive")
         val KEY_FLOATING_WINDOW = booleanPreferencesKey("floating_window")
+        val KEY_MODEL_CUSTOM_NAMES = stringPreferencesKey("model_custom_names")
     }
 
     val serverPort: Flow<Int> = context.dataStore.data.map { it[KEY_PORT] ?: 8080 }
@@ -41,6 +44,7 @@ class AppPreferences(private val context: Context) {
     }
     val keepAlive: Flow<Boolean> = context.dataStore.data.map { it[KEY_KEEP_ALIVE] ?: true }
     val floatingWindowEnabled: Flow<Boolean> = context.dataStore.data.map { it[KEY_FLOATING_WINDOW] ?: true }
+    val modelCustomNames: Flow<String> = context.dataStore.data.map { it[KEY_MODEL_CUSTOM_NAMES] ?: "{}" }
 
     suspend fun setServerPort(port: Int) { context.dataStore.edit { it[KEY_PORT] = port } }
     suspend fun setBackend(backend: String) { context.dataStore.edit { it[KEY_BACKEND] = backend } }
@@ -53,4 +57,31 @@ class AppPreferences(private val context: Context) {
     suspend fun setSystemPrompt(prompt: String) { context.dataStore.edit { it[KEY_SYSTEM_PROMPT] = prompt } }
     suspend fun setKeepAlive(on: Boolean) { context.dataStore.edit { it[KEY_KEEP_ALIVE] = on } }
     suspend fun setFloatingWindow(enabled: Boolean) { context.dataStore.edit { it[KEY_FLOATING_WINDOW] = enabled } }
+
+    suspend fun setModelCustomName(modelId: String, customName: String) {
+        context.dataStore.edit { prefs ->
+            val json = prefs[KEY_MODEL_CUSTOM_NAMES] ?: "{}"
+            val map = try {
+                org.json.JSONObject(json)
+            } catch (_: Exception) { org.json.JSONObject() }
+            if (customName.isBlank()) map.remove(modelId)
+            else map.put(modelId, customName)
+            prefs[KEY_MODEL_CUSTOM_NAMES] = map.toString()
+        }
+    }
+
+    /**
+     * 获取模型显示名（同步，供非 Compose 上下文使用）：
+     * 自定义名 → 预设模型名 → modelId 自身
+     */
+    fun getModelDisplayName(modelId: String): String {
+        return try {
+            val jsonStr = runBlocking { modelCustomNames.first() }
+            val map = org.json.JSONObject(jsonStr)
+            val customName = map.optString(modelId)
+            if (customName.isNotEmpty()) customName
+            else com.rainyllm.app.model.ModelInfo.PRESET_MODELS
+                .find { it.id == modelId }?.name ?: modelId
+        } catch (_: Exception) { modelId }
+    }
 }

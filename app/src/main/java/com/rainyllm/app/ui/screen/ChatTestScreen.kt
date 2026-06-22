@@ -178,8 +178,8 @@ fun ChatTestScreen(
                         val effectiveMaxTokens = prefs.maxTokens.first()
                         val newEngine = LlmEngine(
                             effectiveModelPath, effectiveCacheDir,
-                            visionBackend = com.google.ai.edge.litertlm.Backend.CPU(),
-                            audioBackend = com.google.ai.edge.litertlm.Backend.CPU(),
+                            visionBackend = com.google.ai.edge.litertlm.Backend.GPU(),
+                    audioBackend = com.google.ai.edge.litertlm.Backend.CPU(),  // 模型要求audio后端必须是CPU
                             maxNumTokens = effectiveMaxTokens
                         )
                         newEngine.initialize(backend = engineBackend)

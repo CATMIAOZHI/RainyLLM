@@ -20,6 +20,7 @@ fun ServerStatusCard(
     port: Int,
     uptimeSec: Long,
     isEngineReady: Boolean,
+    backend: String = "cpu",
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -60,6 +61,7 @@ fun ServerStatusCard(
             ) {
                 InfoItem("端口", port.toString())
                 InfoItem("引擎", if (isEngineReady) "✅ 就绪" else "⏳ 加载中")
+                InfoItem("推理后端", backend.uppercase())
                 InfoItem("运行时长", formatUptime(uptimeSec))
             }
         }

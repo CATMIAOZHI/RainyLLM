@@ -1,8 +1,10 @@
 package com.rainyllm.app.ui.component
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -22,8 +24,11 @@ fun ModelDownloadCard(
     onCancel: () -> Unit,
     onDelete: () -> Unit,
     onSelect: () -> Unit,
+    onRename: () -> Unit = {},
     onExport: () -> Unit = {},
     isSelected: Boolean,
+    displayName: String = model.modelInfo.name,
+    isCustom: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -47,11 +52,23 @@ fun ModelDownloadCard(
             Spacer(Modifier.width(12.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = model.modelInfo.name,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = displayName,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (isCustom && model.isDownloaded) {
+                        TextButton(
+                            onClick = onRename,
+                            contentPadding = PaddingValues(4.dp),
+                            modifier = Modifier.height(28.dp)
+                        ) {
+                            Text("✏️", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
                 Text(
                     text = if (model.isDownloaded)
                         "✅ 已下载 · ${model.modelInfo.sizeGb}"
@@ -87,17 +104,31 @@ fun ModelDownloadCard(
                     }
                 }
                 model.isDownloaded -> {
+                    var menuExpanded by remember { mutableStateOf(false) }
                     if (isSelected) {
                         Text("🌟", style = MaterialTheme.typography.titleMedium)
                     }
                     TextButton(onClick = onSelect) {
                         Text(if (isSelected) "使用中" else "选用")
                     }
-                    TextButton(onClick = onExport) {
-                        Text("导出")
-                    }
-                    TextButton(onClick = onDelete) {
-                        Text("删除", color = MaterialTheme.colorScheme.error)
+                    Box {
+                        IconButton(onClick = { menuExpanded = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "更多操作",
+                                modifier = Modifier.size(20.dp))
+                        }
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("导出") },
+                                onClick = { menuExpanded = false; onExport() }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("删除", color = MaterialTheme.colorScheme.error) },
+                                onClick = { menuExpanded = false; onDelete() }
+                            )
+                        }
                     }
                 }
                 else -> {

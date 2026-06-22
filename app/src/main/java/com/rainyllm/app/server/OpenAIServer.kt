@@ -32,6 +32,7 @@ import fi.iki.elonen.NanoHTTPD.Method
 class OpenAIServer(
     private val port: Int,
     private val llmEngine: LlmEngine,
+    private val cacheDir: java.io.File,
     private val modelId: String = "gemma4-e2b",
     private val defaultSamplerConfig: SamplerConfig? = null,
     /** 动态读取最新 SamplerConfig 的供应商（优先于 defaultSamplerConfig） */
@@ -156,6 +157,8 @@ class OpenAIServer(
         }
     }
 
+    private var audioFileCounter = 0L
+
     /**
      * 解码 data:...;base64,... URL 为字节数组
      */
@@ -256,8 +259,34 @@ class OpenAIServer(
                             }
                         }
                         "input_audio" -> {
-                            val d = (partMap["input_audio"] as? Map<*, *>)?.get("data")?.toString()
-                            if (d != null) multimodalContents.add(Content.AudioBytes(Base64.decode(d, Base64.DEFAULT)))
+                            val audioObj = partMap["input_audio"]
+                            val d = when (audioObj) {
+                                is Map<*, *> -> audioObj["data"]?.toString() ?: ""
+                                is String -> audioObj
+                                else -> ""
+                            }
+                            Log.i(TAG, "🔊 input_audio 收到: dataLen=${d.length}, startsWithData=${d.startsWith("data:")}, first20=${d.take(20)}")
+                            if (d.isBlank()) {
+                                Log.w(TAG, "🔊 音频数据为空，跳过")
+                            } else {
+                                try {
+                                    val bytes = if (d.startsWith("data:")) {
+                                        decodeDataUrl(d)
+                                    } else {
+                                        Base64.decode(d, Base64.DEFAULT)
+                                    }
+                                    if (bytes != null && bytes.isNotEmpty()) {
+                                        val hexHeader = bytes.take(16).joinToString(" ") { "%02X".format(it) }
+                                        Log.i(TAG, "🔊 音频解码成功: ${bytes.size} bytes, header=$hexHeader")
+                                        multimodalContents.add(Content.AudioBytes(bytes))
+                                        Log.i(TAG, "🔊 AudioBytes 已加入 multimodalContents (当前共 ${multimodalContents.size} 块)")
+                                    } else {
+                                        Log.w(TAG, "🔊 音频解码后为空或null，跳过")
+                                    }
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "音频 base64 解码失败: ${e.message}", e)
+                                }
+                            }
                         }
                     }
                 }
@@ -326,8 +355,15 @@ class OpenAIServer(
             val role = msg["role"]?.toString() ?: return@mapNotNull null
             when (role) {
                 "user" -> {
-                    val content = msg["content"]?.toString() ?: return@mapNotNull null
-                    com.google.ai.edge.litertlm.Message.user(content)
+                    val content = msg["content"]
+                    // 多模态历史消息：只提取文本部分
+                    val text = when (content) {
+                        is List<*> -> content.mapNotNull { part ->
+                            (part as? Map<*, *>)?.takeIf { it["type"] == "text" }?.get("text")?.toString()
+                        }.joinToString("\n").ifBlank { null }
+                        else -> content?.toString()
+                    } ?: return@mapNotNull null
+                    com.google.ai.edge.litertlm.Message.user(text)
                 }
                 "assistant" -> {
                     val content = msg["content"]?.toString()?.takeIf { it.isNotBlank() } ?: ""
@@ -404,6 +440,19 @@ private fun handleSyncResponse(
                 automaticToolCalling = false  // 不自动执行 → 返回 tool_calls 给客户端
             )
             val isMultimodal = multimodalContents.size > 1
+            if (isMultimodal) {
+                Log.i(TAG, "多模态推理: ${multimodalContents.size} 个 content 块 (${
+                    multimodalContents.map { it.javaClass.simpleName }.joinToString(", ")
+                })")
+                multimodalContents.forEachIndexed { idx, c ->
+                    when (c) {
+                        is Content.AudioBytes -> Log.i(TAG, "  [$idx] AudioBytes: ${c.bytes.size} bytes")
+                        is Content.ImageBytes -> Log.i(TAG, "  [$idx] ImageBytes: ${c.bytes.size} bytes")
+                        is Content.Text -> Log.i(TAG, "  [$idx] Text: ${c.text.take(80)}")
+                        else -> Log.i(TAG, "  [$idx] ${c.javaClass.simpleName}")
+                    }
+                }
+            }
             val result: String
             val actualPromptTokens: Int
             val actualCompletionTokens: Int

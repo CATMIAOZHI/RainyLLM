@@ -12,7 +12,7 @@
 
 | 特性 | 说明 |
 |------|------|
-| 🧠 **本地推理** | 基于 Google LiteRT-LM，支持 Gemma4-E2B / Gemma4-E4B / Gemma3-1B |
+| 🧠 **本地推理** | 基于 Google LiteRT-LM，支持 Gemma4-E2B / Gemma4-E4B 官方及无限制版本 |
 | 🌐 **OpenAI 兼容 API** | `/v1/chat/completions` · `/v1/models` · `/health` |
 | 📡 **SSE 流式输出** | 原生支持 `stream: true`，逐 token 流式推送到客户端 |
 | 🖼️ **多模态** | 支持图片 (ImageBytes/ImageFile) + 音频 (AudioBytes) 输入 |
@@ -127,7 +127,7 @@ RainyLLM/
 │       │   ├── TokenStatsChart.kt       # 推理统计图表
 │       │   ├── LogViewer.kt             # 请求日志列表
 │       │   └── DebugCard.kt             # 诊断面板
-│       └── theme/                       # MD3 主题（蓝紫色调）
+│       └── theme/                       # MD3 主题（元气猫系粉色主题）
 │
 ├── gradle/libs.versions.toml            # Version Catalog 依赖管理
 ├── build.gradle.kts                     # 项目级配置
@@ -216,6 +216,8 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
 |--------|----------|
 | **ChatBox** | 设置 → 模型提供方 → OpenAI 兼容 → 填入 `http://127.0.0.1:8080` |
 | **Open WebUI** | 设置 → 连接 → OpenAI API → 填入 `http://127.0.0.1:8080/v1` |
+
+> 🎵 **音频输入**：API 支持 `input_audio` 类型的多模态输入。音频需为 16kHz/24kHz mono PCM WAV 或 MP3，base64 编码后放入 `input_audio.data` 字段。M4A/AAC 等格式需先用 ffmpeg 转码。
 
 ---
 

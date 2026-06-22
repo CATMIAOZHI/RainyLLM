@@ -1,5 +1,7 @@
 package com.rainyllm.app.ui.screen
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
@@ -7,8 +9,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
@@ -39,11 +43,15 @@ fun DashboardScreen(isVisible: Boolean = true) {
     // 从 DataStore 读取保存的端口和模型
     var port by remember { mutableIntStateOf(8080) }
     var selectedModel by remember { mutableStateOf("gemma4-e2b") }
+    var backend by remember { mutableStateOf("cpu") }
     LaunchedEffect(Unit) {
         prefs.serverPort.collect { port = it }
     }
     LaunchedEffect(Unit) {
         prefs.selectedModel.collect { selectedModel = it }
+    }
+    LaunchedEffect(Unit) {
+        prefs.backend.collect { backend = it }
     }
 
     // ── 状态同步：从 OpenAIServer.currentInstance 和 LlmServerService 拉取 ──
@@ -222,7 +230,8 @@ fun DashboardScreen(isVisible: Boolean = true) {
             isRunning = isServerRunning,
             port = port,
             uptimeSec = uptimeSec,
-            isEngineReady = isEngineReady
+            isEngineReady = isEngineReady,
+            backend = backend
         )
 
         // ── 悬浮窗权限缺失警告 ──────────────────────────
@@ -340,18 +349,36 @@ fun DashboardScreen(isVisible: Boolean = true) {
                     containerColor = MaterialTheme.colorScheme.errorContainer
                 )
             ) {
-                Row(
-                    modifier = Modifier.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("⚠️", style = MaterialTheme.typography.titleMedium)
-                    Spacer(Modifier.width(8.dp))
-                    Column {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("⚠️", style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.width(8.dp))
                         Text(
                             "喵呜…启动失败了",
                             style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.weight(1f)
                         )
+                        IconButton(
+                            onClick = {
+                                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("error", initError ?: ""))
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.ContentCopy,
+                                contentDescription = "复制错误信息",
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.6f)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    SelectionContainer {
                         Text(
                             initError!!,
                             style = MaterialTheme.typography.bodySmall,

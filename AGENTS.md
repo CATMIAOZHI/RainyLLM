@@ -51,6 +51,9 @@ app/src/main/java/com/rainyllm/app/
 - **悬浮窗生命周期**：`FloatingWindowManager` 是进程级单例 object，由 `RainyLLMApp` 初始化；显示/隐藏由 `setEnabled()` 控制
 - **全局状态同步**：`LlmServerService.isInitializing` / `isStopping` 是静态标志，DashboardScreen 和 FloatingWindowManager 都读它们来同步「启动中/停止中」
 - **二次确认**：悬浮窗的启动/停止按钮需要点两下才执行（防误触），3秒超时恢复
+- **音频输入**：API 路径必须用 `Content.AudioBytes(bytes)`，不要用 `Content.AudioFile(path)`（沙箱权限导致无法读取）。音频编码器要求 16kHz/24kHz mono WAV 或 MP3，其他容器格式（M4A等）需转码
+- **日志截断**：`LogViewer` 的请求体展示截断到 10K 字符，防止 base64 音频（可达 400K+）导致 Compose Text OOM 闪退。复制按钮仍复制完整内容
+- **自定义模型名**：存储在 DataStore JSON 映射（`model_custom_names` key）中，通过 `getModelDisplayName()` 优先显示别名。支持清空恢复原名
 - **通知栏 Action**：`NotificationActionReceiver` 处理「悬浮窗」和「退出」两个广播
 
 ## 构建
@@ -81,5 +84,3 @@ export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-arm64
 ## 深入文档
 
 - `README.md` — 完整功能说明和 API 使用示例
-- `PROJECT_PLAN.md` — 原始技术规划（部分过时）
-- `PROGRESS.md` — 原始开发进度（已过时）

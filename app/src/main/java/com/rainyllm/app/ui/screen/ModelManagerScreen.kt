@@ -22,6 +22,7 @@ import com.rainyllm.app.RainyLLMApp
 import com.rainyllm.app.data.AppPreferences
 import com.rainyllm.app.model.DownloadedModel
 import com.rainyllm.app.model.ModelDownloader
+import com.rainyllm.app.model.ModelInfo
 import com.rainyllm.app.model.ModelRepository
 import com.rainyllm.app.model.ModelValidator
 import com.rainyllm.app.ui.component.ModelDownloadCard
@@ -55,6 +56,24 @@ fun ModelManagerScreen(isVisible: Boolean = true) {
     // 存储空间
     var storageWarning by remember { mutableStateOf<String?>(null) }
     var importMessage by remember { mutableStateOf<String?>(null) }
+
+    // ── 自定义模型名 ──
+    var customNames by remember { mutableStateOf(mapOf<String, String>()) }
+    var renameModelId by remember { mutableStateOf<String?>(null) }
+    var renameText by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        prefs.modelCustomNames.collect { jsonStr ->
+            customNames = try {
+                val obj = org.json.JSONObject(jsonStr)
+                val map = mutableMapOf<String, String>()
+                obj.keys().forEach { key -> map[key] = obj.getString(key) }
+                map
+            } catch (_: Exception) { emptyMap() }
+        }
+    }
+
+    fun isCustomModel(modelId: String): Boolean =
+        ModelInfo.PRESET_MODELS.none { it.id == modelId }
 
     // ── 文件选择器：导入 ──
     val importLauncher = rememberLauncherForActivityResult(
@@ -254,11 +273,19 @@ fun ModelManagerScreen(isVisible: Boolean = true) {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             items(models) { model ->
+                val modelId = model.modelInfo.id
+                val isCustom = isCustomModel(modelId)
                 ModelDownloadCard(
                     model = model,
-                    downloadProgress = downloadProgresses[model.modelInfo.id] ?: 0,
-                    isDownloading = model.modelInfo.id in downloadingIds,
-                    isSelected = model.modelInfo.id == selectedModelId && model.isDownloaded,
+                    downloadProgress = downloadProgresses[modelId] ?: 0,
+                    isDownloading = modelId in downloadingIds,
+                    isSelected = modelId == selectedModelId && model.isDownloaded,
+                    displayName = customNames[modelId] ?: model.modelInfo.name,
+                    isCustom = isCustom,
+                    onRename = {
+                        renameModelId = modelId
+                        renameText = customNames[modelId] ?: model.modelInfo.name
+                    },
                     onDownload = {
                         val minBytes = model.modelInfo.sizeBytes + 1_000_000_000L
                         val available = downloader.checkStorageSpace(minBytes)
@@ -267,10 +294,10 @@ fun ModelManagerScreen(isVisible: Boolean = true) {
                             return@ModelDownloadCard
                         }
                         storageWarning = null
-                        val file = repo.getModelFile(model.modelInfo.id)
+                        val file = repo.getModelFile(modelId)
                         val downloadId = downloader.startDownload(model.modelInfo, file, model.modelInfo.url)
-                        downloadIdsMap = downloadIdsMap + (model.modelInfo.id to downloadId)
-                        downloadingIds = downloadingIds + model.modelInfo.id
+                        downloadIdsMap = downloadIdsMap + (modelId to downloadId)
+                        downloadingIds = downloadingIds + modelId
                     },
                     onDownloadMirror = {
                         val minBytes = model.modelInfo.sizeBytes + 1_000_000_000L
@@ -280,42 +307,75 @@ fun ModelManagerScreen(isVisible: Boolean = true) {
                             return@ModelDownloadCard
                         }
                         storageWarning = null
-                        val file = repo.getModelFile(model.modelInfo.id)
+                        val file = repo.getModelFile(modelId)
                         val downloadId = downloader.startDownload(model.modelInfo, file, model.modelInfo.mirrorUrl)
-                        downloadIdsMap = downloadIdsMap + (model.modelInfo.id to downloadId)
-                        downloadingIds = downloadingIds + model.modelInfo.id
+                        downloadIdsMap = downloadIdsMap + (modelId to downloadId)
+                        downloadingIds = downloadingIds + modelId
                     },
                     onCancel = {
-                        val downloadId = downloadIdsMap[model.modelInfo.id]
+                        val downloadId = downloadIdsMap[modelId]
                         if (downloadId != null) {
                             downloader.removeDownload(downloadId)
-                            // 清理可能的不完整文件
-                            val partialFile = repo.getModelFile(model.modelInfo.id)
+                            val partialFile = repo.getModelFile(modelId)
                             if (partialFile.exists() && partialFile.length() < model.modelInfo.sizeBytes) {
                                 partialFile.delete()
                             }
                         }
-                        downloadingIds = downloadingIds - model.modelInfo.id
+                        downloadingIds = downloadingIds - modelId
                     },
                     onDelete = {
-                        repo.deleteModel(model.modelInfo.id)
-                        if (selectedModelId == model.modelInfo.id) {
-                            // 如果删除的是当前选中的模型，回退到默认模型
+                        repo.deleteModel(modelId)
+                        if (selectedModelId == modelId) {
                             selectedModelId = "gemma4-e2b"
                             scope.launch { prefs.setSelectedModel("gemma4-e2b") }
                         }
                         models = repo.getAllModels()
                     },
                     onSelect = {
-                        selectedModelId = model.modelInfo.id
-                        scope.launch { prefs.setSelectedModel(model.modelInfo.id) }
+                        selectedModelId = modelId
+                        scope.launch { prefs.setSelectedModel(modelId) }
                     },
                     onExport = {
-                        exportModelId = model.modelInfo.id
-                        exportLauncher.launch("${model.modelInfo.id}.litertlm")
+                        exportModelId = modelId
+                        exportLauncher.launch("${modelId}.litertlm")
                     }
                 )
             }
+        }
+
+        // ── 重命名对话框 ──────────────────────────────────
+        if (renameModelId != null) {
+            AlertDialog(
+                onDismissRequest = { renameModelId = null },
+                title = { Text("✏️ 自定义模型名称") },
+                text = {
+                    Column {
+                        Text("为「${renameModelId}」设置一个别名",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = renameText,
+                            onValueChange = { renameText = it },
+                            singleLine = true,
+                            label = { Text("模型名称") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        scope.launch {
+                            prefs.setModelCustomName(renameModelId!!, renameText.trim())
+                            importMessage = "✅ 已重命名为「${renameText.trim()}」喵~"
+                        }
+                        renameModelId = null
+                    }) { Text("保存") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { renameModelId = null }) { Text("取消") }
+                }
+            )
         }
     }
 }

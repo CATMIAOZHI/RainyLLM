@@ -414,20 +414,26 @@ private fun ScrollableDetailBlock(
     onCopy: () -> Unit,
     onCopiedReset: () -> Unit
 ) {
+    // 超长内容截断显示，避免 Compose Text 渲染 OOM（base64 音频可达 400K+ 字符）
+    val maxDisplay = 10_000
+    val truncated = content.length > maxDisplay
+    val displayContent = if (truncated) {
+        content.take(maxDisplay) + "\n\n... [已截断前 ${maxDisplay} 字符，完整内容 ${content.length} 字符请用复制按钮获取]"
+    } else content
+
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
         )
     ) {
         Column {
-            // 标题行 + 复制按钮
             Row(
                 modifier = Modifier.fillMaxWidth()
                     .padding(start = 10.dp, end = 2.dp, top = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = title,
+                    text = title + if (truncated) " [已截断显示]" else "",
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary,
@@ -456,7 +462,6 @@ private fun ScrollableDetailBlock(
                     modifier = Modifier.padding(horizontal = 10.dp)
                 )
             }
-            // 可滚动的正文区域
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -466,7 +471,7 @@ private fun ScrollableDetailBlock(
                 val scrollState = rememberScrollState()
                 SelectionContainer {
                     Text(
-                        text = content,
+                        text = displayContent,
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.sp,

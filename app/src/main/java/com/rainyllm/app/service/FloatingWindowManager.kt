@@ -51,6 +51,7 @@ object FloatingWindowManager {
 
     private var statusText: TextView? = null
     private var modelText: TextView? = null
+    private var backendText: TextView? = null
     private var infoText: TextView? = null
     private var statsText: TextView? = null
     private var mainBtn: Button? = null
@@ -195,6 +196,12 @@ object FloatingWindowManager {
             setPadding(0, 0, 0, dp2); text = "模型: —"
         }
         fullView!!.addView(modelText)
+
+        backendText = TextView(ctx).apply {
+            setTextColor(textDim); setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            setPadding(0, 0, 0, dp2); text = "后端: cpu"
+        }
+        fullView!!.addView(backendText)
 
         infoText = TextView(ctx).apply {
             setTextColor(textDim); setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
@@ -447,7 +454,11 @@ object FloatingWindowManager {
             }
             pendingWhat = "stop"
         } else {
-            // isStartingServer 只在服务确实启动后才清除（不是这里！）
+            // 启动失败：isInitializing 已熄灭但服务未运行 → 重置
+            if (isStartingServer && !LlmServerService.isInitializing) {
+                isStartingServer = false
+                actionBtn?.isEnabled = true
+            }
             if (isStoppingServer && !LlmServerService.isStopping) { isStoppingServer = false; actionBtn?.isEnabled = true }
             statusText?.apply {
                 text = "🔴 已停止"; setTextColor(statusStoppedColor)
@@ -461,7 +472,11 @@ object FloatingWindowManager {
             }
             pendingWhat = "start"
         }
-        modelText?.text = "模型: $modelId"
+        modelText?.text = "模型: ${AppPreferences(ctx).getModelDisplayName(modelId)}"
+        val backendStr = try {
+            runBlocking { AppPreferences(ctx).backend.first() }
+        } catch (_: Exception) { "cpu" }
+        backendText?.text = "后端: ${backendStr.uppercase()}"
     }
 
     // ── 按钮事件 ────────────────────────────────────────

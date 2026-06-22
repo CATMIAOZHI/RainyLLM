@@ -192,7 +192,7 @@ class LlmServerService : Service() {
                 engine = LlmEngine(
                     modelPath, cacheDir,
                     visionBackend = Backend.GPU(),
-                    audioBackend = Backend.CPU(),
+                    audioBackend = Backend.CPU(),  // 模型要求audio后端必须是CPU
                     maxNumTokens = engineParams.maxNumTokens
                 )
                 // ★ 修复：立即追踪引擎引用，确保 stopAll() 能关闭未完成初始化的引擎
@@ -207,7 +207,7 @@ class LlmServerService : Service() {
 
                 if (Thread.currentThread().isInterrupted) return@Thread
 
-                val server = OpenAIServer(port, engine, modelId, samplerConfig,
+                val server = OpenAIServer(port, engine, java.io.File(cacheDir), modelId, samplerConfig,
                     samplerConfigSupplier = {
                         val p = AppPreferences(this@LlmServerService)
                         kotlinx.coroutines.runBlocking {
