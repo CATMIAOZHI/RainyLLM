@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Build
 import android.util.Log
 import com.rainyllm.app.data.StatsRepository
+import com.rainyllm.app.service.FloatingWindowManager
 import com.rainyllm.app.service.KeepAliveService
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
@@ -28,8 +29,10 @@ class RainyLLMApp : Application() {
         super.onCreate()
         instance = this
         StatsRepository.init(this)
+        FloatingWindowManager.init(this)
         Log.i(TAG, "🐱☁️ RainyLLM 应用启动")
         startKeepAliveIfNeeded()
+        initFloatingWindowIfNeeded()
     }
 
     /** 根据 DataStore 设置启动/停止保活服务 */
@@ -64,6 +67,22 @@ class RainyLLMApp : Application() {
                 // DataStore 可能尚未初始化，静默失败
             }
         }
+    }
+
+    private fun initFloatingWindowIfNeeded() {
+        applicationScope.launch {
+            kotlinx.coroutines.delay(500L)
+            try {
+                val prefs = com.rainyllm.app.data.AppPreferences(this@RainyLLMApp)
+                val enabled = prefs.floatingWindowEnabled.first()
+                FloatingWindowManager.setEnabled(enabled)
+            } catch (_: Exception) {}
+        }
+    }
+
+    /** 根据 DataStore 设置显示/隐藏悬浮窗 */
+    fun syncFloatingWindow(enabled: Boolean) {
+        FloatingWindowManager.setEnabled(enabled)
     }
 
     /** 模型存储目录（外部应用专属目录，DownloadManager 可直接写入） */

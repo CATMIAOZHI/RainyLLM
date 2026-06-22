@@ -25,6 +25,7 @@ class AppPreferences(private val context: Context) {
         val KEY_SELECTED_MODEL = stringPreferencesKey("selected_model")
         val KEY_SYSTEM_PROMPT = stringPreferencesKey("system_prompt")
         val KEY_KEEP_ALIVE = booleanPreferencesKey("keep_alive")
+        val KEY_FLOATING_WINDOW = booleanPreferencesKey("floating_window")
     }
 
     val serverPort: Flow<Int> = context.dataStore.data.map { it[KEY_PORT] ?: 8080 }
@@ -39,6 +40,7 @@ class AppPreferences(private val context: Context) {
         it[KEY_SYSTEM_PROMPT] ?: "你是雨晴喵，是一个喜欢卖萌的小猫ai助手"
     }
     val keepAlive: Flow<Boolean> = context.dataStore.data.map { it[KEY_KEEP_ALIVE] ?: true }
+    val floatingWindowEnabled: Flow<Boolean> = context.dataStore.data.map { it[KEY_FLOATING_WINDOW] ?: true }
 
     suspend fun setServerPort(port: Int) { context.dataStore.edit { it[KEY_PORT] = port } }
     suspend fun setBackend(backend: String) { context.dataStore.edit { it[KEY_BACKEND] = backend } }
@@ -50,4 +52,5 @@ class AppPreferences(private val context: Context) {
     suspend fun setSelectedModel(model: String) { context.dataStore.edit { it[KEY_SELECTED_MODEL] = model } }
     suspend fun setSystemPrompt(prompt: String) { context.dataStore.edit { it[KEY_SYSTEM_PROMPT] = prompt } }
     suspend fun setKeepAlive(on: Boolean) { context.dataStore.edit { it[KEY_KEEP_ALIVE] = on } }
+    suspend fun setFloatingWindow(enabled: Boolean) { context.dataStore.edit { it[KEY_FLOATING_WINDOW] = enabled } }
 }

@@ -84,6 +84,18 @@ class KeepAliveService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+
+        val toggleIntent = PendingIntent.getBroadcast(
+            this, 1,
+            Intent(NotificationActionReceiver.ACTION_TOGGLE_FLOATING).setPackage(packageName),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val exitIntent = PendingIntent.getBroadcast(
+            this, 2,
+            Intent(NotificationActionReceiver.ACTION_EXIT_APP).setPackage(packageName),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle("RainyLLM")
@@ -91,6 +103,8 @@ class KeepAliveService : Service() {
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentIntent(pi)
                 .setOngoing(true)
+                .addAction(0, "悬浮窗", toggleIntent)
+                .addAction(0, "退出", exitIntent)
                 .build()
         } else {
             @Suppress("DEPRECATION")
@@ -100,6 +114,8 @@ class KeepAliveService : Service() {
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentIntent(pi)
                 .setOngoing(true)
+                .addAction(0, "悬浮窗", toggleIntent)
+                .addAction(0, "退出", exitIntent)
                 .build()
         }
     }

@@ -23,6 +23,7 @@ import com.rainyllm.app.data.AppPreferences
 import com.rainyllm.app.data.StatsRepository
 import com.rainyllm.app.model.ModelRepository
 import com.rainyllm.app.service.LlmServerService
+import com.rainyllm.app.service.FloatingWindowManager
 import com.rainyllm.app.ui.component.DebugCard
 import com.rainyllm.app.ui.component.LogViewer
 import com.rainyllm.app.ui.component.ServerStatusCard
@@ -93,6 +94,13 @@ fun DashboardScreen(isVisible: Boolean = true) {
     var initError by remember { mutableStateOf<String?>(null) }
     // 防抖：启动进行中标记
     var isStarting by remember { mutableStateOf(false) }
+    var floatingWindowEnabled by remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        prefs.floatingWindowEnabled.collect { floatingWindowEnabled = it }
+    }
+
+    // 权限状态（响应式驱动警告卡片）
+    var overlayOk by remember { mutableStateOf(FloatingWindowManager.canDrawOverlays()) }
 
     // Composable 协程作用域（替代 MainScope 泄漏）
     val scope = rememberCoroutineScope()
@@ -103,9 +111,13 @@ fun DashboardScreen(isVisible: Boolean = true) {
         while (true) {
             val server = com.rainyllm.app.server.OpenAIServer.currentInstance
             isServerRunning = server?.isServerRunning == true
-            isEngineReady = isServerRunning  // 服务器启动=引擎就绪
-            // ★ Bug修复：同步引擎初始化错误信息到 UI
+            isEngineReady = isServerRunning
             initError = LlmServerService.lastInitError
+
+            // 同步全局初始化/停止状态
+            if (LlmServerService.isInitializing && !isServerRunning) {
+                isStarting = true
+            }
             // 启动成功或失败时解除防抖
             if (isServerRunning || initError != null) {
                 isStarting = false
@@ -180,6 +192,17 @@ fun DashboardScreen(isVisible: Boolean = true) {
                 statsSummary = StatsRepository.instance?.getSummary()
                     ?: StatsRepository.StatsSummary()
             }
+
+            // ── 悬浮窗权限恢复检测 ──────────────────────
+            val nowOverlayOk = FloatingWindowManager.canDrawOverlays()
+            if (nowOverlayOk != overlayOk) {
+                overlayOk = nowOverlayOk
+            }
+            if (floatingWindowEnabled && nowOverlayOk) {
+                // 权限恢复或启动时自动激活悬浮窗
+                com.rainyllm.app.RainyLLMApp.instance.syncFloatingWindow(true)
+            }
+
             kotlinx.coroutines.delay(1000L)
         }
     }
@@ -201,6 +224,42 @@ fun DashboardScreen(isVisible: Boolean = true) {
             uptimeSec = uptimeSec,
             isEngineReady = isEngineReady
         )
+
+        // ── 悬浮窗权限缺失警告 ──────────────────────────
+        if (floatingWindowEnabled && !overlayOk) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                )
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("⚠️", style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "悬浮窗权限未开启",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "已开启悬浮窗功能但缺少「显示在其他应用上层」权限，悬浮窗无法显示。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f)
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedButton(
+                        onClick = { FloatingWindowManager.requestOverlayPermission() },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Text("去授权")
+                    }
+                }
+            }
+        }
 
         // 控制按钮
         Row(

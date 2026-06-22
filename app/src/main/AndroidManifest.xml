@@ -15,6 +15,9 @@
     <!-- 前台服务通知权限（Android 13+） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- 悬浮窗权限 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <application
         android:name=".RainyLLMApp"
         android:allowBackup="false"
@@ -52,6 +55,16 @@
             android:name=".service.KeepAliveService"
             android:foregroundServiceType="specialUse"
             android:exported="false" />
+
+        <!-- 通知栏按钮广播接收器 -->
+        <receiver
+            android:name=".service.NotificationActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.rainyllm.app.TOGGLE_FLOATING" />
+                <action android:name="com.rainyllm.app.EXIT_APP" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

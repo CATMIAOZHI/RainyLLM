@@ -19,6 +19,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.rainyllm.app.data.AppPreferences
+import com.rainyllm.app.service.FloatingWindowManager
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -71,6 +72,7 @@ fun SettingsScreen() {
     var maxTokens by remember { mutableIntStateOf(4096) }
     var idleTimeout by remember { mutableIntStateOf(5) }
     var keepAlive by remember { mutableStateOf(true) }
+    var floatingWindowEnabled by remember { mutableStateOf(true) }
 
     // 独立文本缓冲区
     var portText by remember { mutableStateOf("8080") }
@@ -93,6 +95,7 @@ fun SettingsScreen() {
         idleTimeout = prefs.idleTimeoutMin.first(); idleTimeoutText = idleTimeout.toString()
         backend = prefs.backend.first()
         keepAlive = prefs.keepAlive.first()
+        floatingWindowEnabled = prefs.floatingWindowEnabled.first()
     }
 
     val focusManager = LocalFocusManager.current
@@ -322,6 +325,73 @@ fun SettingsScreen() {
                     }
                 )
             }
+        }
+
+        // ── 悬浮窗设置 ──────────────────────────────────
+        val canDrawOverlays = FloatingWindowManager.canDrawOverlays()
+        var showOverlayGuide by remember { mutableStateOf(false) }
+
+        SettingsSection("🪟 实时悬浮窗") {
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("显示悬浮窗", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            if (canDrawOverlays) "在其他应用上方显示服务状态"
+                            else "⚠️ 需要「显示在其他应用上层」权限",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (canDrawOverlays)
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            else MaterialTheme.colorScheme.error
+                        )
+                    }
+                    Switch(
+                        checked = floatingWindowEnabled,
+                        onCheckedChange = { checked ->
+                            if (checked && !FloatingWindowManager.canDrawOverlays()) {
+                                // 无权限 → 弹出引导，不修改开关状态
+                                showOverlayGuide = true
+                            } else {
+                                floatingWindowEnabled = checked
+                                scope.launch { prefs.setFloatingWindow(checked) }
+                                com.rainyllm.app.RainyLLMApp.instance.syncFloatingWindow(checked)
+                            }
+                        }
+                    )
+                }
+                if (!canDrawOverlays) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { showOverlayGuide = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("去开启悬浮窗权限")
+                    }
+                }
+            }
+        }
+
+        if (showOverlayGuide) {
+            AlertDialog(
+                onDismissRequest = { showOverlayGuide = false },
+                title = { Text("需要悬浮窗权限") },
+                text = {
+                    Text("点击确定后将跳转到系统设置，请找到 RainyLLM 并开启「允许显示在其他应用上层」。")
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        FloatingWindowManager.requestOverlayPermission()
+                        showOverlayGuide = false
+                    }) { Text("去设置") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showOverlayGuide = false }) { Text("取消") }
+                }
+            )
         }
 
         // ── 关于 ──────────────────────────────────────

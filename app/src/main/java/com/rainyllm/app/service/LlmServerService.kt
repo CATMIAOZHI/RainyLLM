@@ -51,6 +51,16 @@ class LlmServerService : Service() {
         var lastInitError: String? = null
             private set
 
+        /** 全局状态：引擎初始化进行中 */
+        @Volatile
+        var isInitializing: Boolean = false
+            private set
+
+        /** 全局状态：服务停止进行中 */
+        @Volatile
+        var isStopping: Boolean = false
+            private set
+
         private fun setLastInitError(msg: String?) {
             lastInitError = msg
         }
@@ -61,8 +71,6 @@ class LlmServerService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     /** 修复：持有初始化线程引用，支持 stopAll() 中断 */
     @Volatile private var initThread: Thread? = null
-    /** 修复：原子标记防止重复初始化 */
-    @Volatile private var isInitializing: Boolean = false
     /** ★ 修复：追踪正在构建但尚未完成 initialize() 的引擎，防止泄漏 */
     @Volatile private var pendingEngine: LlmEngine? = null
 
@@ -244,6 +252,7 @@ class LlmServerService : Service() {
     }
 
     private fun stopAll() {
+        isStopping = true
         // ★ 修复：先中断旧线程，join 等待结束，防止旧引擎泄漏
         val oldThread = initThread
         if (oldThread != null && oldThread.isAlive) {
@@ -268,6 +277,7 @@ class LlmServerService : Service() {
             wakeLock?.release()
             wakeLock = null
             isEngineReady = false
+            isStopping = false
         }
     }
 
@@ -306,6 +316,17 @@ class LlmServerService : Service() {
             )
         }
 
+        val toggleIntent = PendingIntent.getBroadcast(
+            this, 1,
+            Intent(NotificationActionReceiver.ACTION_TOGGLE_FLOATING).setPackage(packageName),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val exitIntent = PendingIntent.getBroadcast(
+            this, 2,
+            Intent(NotificationActionReceiver.ACTION_EXIT_APP).setPackage(packageName),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle("RainyLLM")
@@ -313,6 +334,8 @@ class LlmServerService : Service() {
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
+                .addAction(0, "悬浮窗", toggleIntent)
+                .addAction(0, "退出", exitIntent)
                 .build()
         } else {
             @Suppress("DEPRECATION")
@@ -322,6 +345,8 @@ class LlmServerService : Service() {
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
+                .addAction(0, "悬浮窗", toggleIntent)
+                .addAction(0, "退出", exitIntent)
                 .build()
         }
     }
