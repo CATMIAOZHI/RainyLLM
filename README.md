@@ -15,6 +15,7 @@
 | 🧠 **本地推理** | 基于 Google LiteRT-LM，支持 Gemma4-E2B / Gemma4-E4B 官方及无限制版本 |
 | 🌐 **OpenAI 兼容 API** | `/v1/chat/completions` · `/v1/models` · `/health` |
 | 📡 **SSE 流式输出** | 原生支持 `stream: true`，逐 token 流式推送到客户端 |
+| 🔧 **Tool Calling** | 支持 OpenAI tool_use 协议，返回 `tool_calls` 供客户端执行后多轮续接 |
 | 🖼️ **多模态** | 支持图片 (ImageBytes/ImageFile) + 音频 (AudioBytes) 输入 |
 | 🎛️ **GPU 加速** | CPU / GPU 后端可切换，GPU prefill 可达 3808 tk/s（S26 Ultra + Gemma4 E2B 实测，解码约 52 tk/s，实际速度因设备而异） |
 | 🔒 **纯本地 · 零联网** | 127.0.0.1 绑定，不暴露到局域网，隐私安全 |
@@ -210,6 +211,21 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"写一首诗"}],"stream":true}'
 ```
 
+### Tool Calling
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages":[{"role":"user","content":"巴黎天气怎样？"}],
+    "tools":[{"type":"function","function":{"name":"get_weather","description":"获取天气","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}],
+    "tool_choice":"auto"
+  }'
+# → 返回 tool_calls，客户端执行后带 tool 结果再次请求续接
+```
+
+> ⚠️ `tool_choice` 支持 `auto` / `none`。`required` 和指定函数格式返回 400（LiteRT-LM 0.14.0 限制）。
+
 ### 客户端配置
 
 | 客户端 | 配置方式 |
@@ -244,7 +260,10 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
 - ✅ 纯离线运行，**零网络请求**（模型下载除外）
 - ✅ 签名密钥由 GitHub Actions 在 CI 中安全生成并发布 Release APK
 - ✅ 请求体大小限制 10MB，防止超大请求导致 OOM
-- ✅ 空闲超时自动休眠引擎，降低后台功耗
+- ✅ 请求日志只存摘要（多模态 Base64 数据不进日志），日志上限 100 条
+- ✅ 空闲超时自动休眠引擎，推理中不会触发休眠（activeRequests 保护）
+- ✅ 模型导入文件名规范化 + canonicalPath 校验，防止路径穿越
+- ⚠️ `tool_choice` 支持 `auto` / `none`，`required` 和指定函数返回 400（LiteRT-LM 0.14.0 限制）
 
 ---
 
@@ -256,8 +275,9 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
 | 📱 内存需求 | 推荐 8GB+ RAM，推理时约占用 2-3GB |
 | ⏱️ 冷启动 | `engine.initialize()` 约 10 秒，需异步执行 |
 | 🔋 电量 | 持续推理会耗电发热，空闲超时自动休眠引擎 |
-| 🧠 模型校验 | SHA256 校验 — 不匹配时软警告而非阻止（HuggingFace 文件可能已更新） |
+| 🧠 模型校验 | SHA256 校验 — 不匹配时显示哈希对比并提示用户确认，不自动选中 |
 | 📡 纯本地 | 127.0.0.1 不对局域网开放 |
+| 🔧 空闲超时 | 可在设置中开关，默认 5 分钟无请求自动休眠引擎；推理中不会触发 |
 
 ---
 
