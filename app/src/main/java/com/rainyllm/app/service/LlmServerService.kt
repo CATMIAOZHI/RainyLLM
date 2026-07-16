@@ -73,6 +73,8 @@ class LlmServerService : Service() {
     @Volatile private var initThread: Thread? = null
     /** ★ 修复：追踪正在构建但尚未完成 initialize() 的引擎，防止泄漏 */
     @Volatile private var pendingEngine: LlmEngine? = null
+    /** ★ 修复：空闲超时检测线程 */
+    @Volatile private var idleTimeoutThread: Thread? = null
 
     // 公开可查询
     var isEngineReady: Boolean = false
@@ -133,18 +135,29 @@ class LlmServerService : Service() {
         // ★ 修复：stopAll 中断旧线程后，旧线程的 finally 可能清除了 isInitializing，需重新设置
         isInitializing = true
 
-        // ★ 修复：清理缓存目录中的旧 shader 缓存和临时文件，防止累积膨胀
+        // ★ 修复：使用版本化缓存子目录，避免每次冷启动都重建 GPU shader
+        // 路径：cacheDir/litertlm-v0.14.0/
+        val litertlmVersion = "v0.14.0"
+        val versionedCacheDir = java.io.File(cacheDir, "litertlm-$litertlmVersion")
         try {
-            val cacheDirFile = java.io.File(cacheDir)
-            if (cacheDirFile.exists()) {
-                cacheDirFile.listFiles()?.forEach { file ->
-                    try { file.deleteRecursively() } catch (_: Exception) {}
+            if (!versionedCacheDir.exists()) {
+                versionedCacheDir.mkdirs()
+                // 首次创建版本目录时，清理旧版本缓存
+                val cacheDirFile = java.io.File(cacheDir)
+                if (cacheDirFile.exists()) {
+                    cacheDirFile.listFiles()?.forEach { file ->
+                        if (file.name.startsWith("litertlm-") && file.name != "litertlm-$litertlmVersion") {
+                            try { file.deleteRecursively() } catch (_: Exception) {}
+                            Log.i(TAG, "清理旧版本缓存: ${file.name}")
+                        }
+                    }
                 }
-                Log.i(TAG, "缓存目录已清理: $cacheDir")
             }
+            Log.i(TAG, "使用版本化缓存目录: ${versionedCacheDir.path}")
         } catch (e: Exception) {
-            Log.w(TAG, "清理缓存目录失败: ${e.message}")
+            Log.w(TAG, "缓存目录初始化失败: ${e.message}")
         }
+        val effectiveCacheDir = versionedCacheDir.absolutePath
 
         val thread = Thread {
             var engine: LlmEngine? = null
@@ -190,7 +203,7 @@ class LlmServerService : Service() {
                 )
 
                 engine = LlmEngine(
-                    modelPath, cacheDir,
+                    modelPath, effectiveCacheDir,
                     visionBackend = Backend.GPU(),
                     audioBackend = Backend.CPU(),  // 模型要求audio后端必须是CPU
                     maxNumTokens = engineParams.maxNumTokens
@@ -207,7 +220,7 @@ class LlmServerService : Service() {
 
                 if (Thread.currentThread().isInterrupted) return@Thread
 
-                val server = OpenAIServer(port, engine, java.io.File(cacheDir), modelId, samplerConfig,
+                val server = OpenAIServer(port, engine, java.io.File(effectiveCacheDir), modelId, samplerConfig,
                     samplerConfigSupplier = {
                         val p = AppPreferences(this@LlmServerService)
                         kotlinx.coroutines.runBlocking {
@@ -224,6 +237,9 @@ class LlmServerService : Service() {
 
                 serverPort = port
                 isEngineReady = true
+
+                // ★ 修复：启动空闲超时检测线程
+                startIdleTimeoutWatcher()
 
                 updateNotification("🤖 RainyLLM 运行中 | 端口: $port")
                 Log.i(TAG, "✅ 引擎 + 服务器初始化完成")
@@ -253,6 +269,9 @@ class LlmServerService : Service() {
 
     private fun stopAll() {
         isStopping = true
+        // ★ 修复：停止空闲超时检测线程
+        idleTimeoutThread?.interrupt()
+        idleTimeoutThread = null
         // ★ 修复：先中断旧线程，join 等待结束，防止旧引擎泄漏
         val oldThread = initThread
         if (oldThread != null && oldThread.isAlive) {
@@ -279,6 +298,42 @@ class LlmServerService : Service() {
             isEngineReady = false
             isStopping = false
         }
+    }
+
+    // ── 空闲超时检测 ──────────────────────────────────────────
+
+    /**
+     * ★ 修复：启动空闲超时检测线程
+     * 当服务器在指定分钟数内无任何请求时，自动停止引擎释放内存。
+     * 服务本身保持运行，用户可从 UI 重新启动。
+     */
+    private fun startIdleTimeoutWatcher() {
+        idleTimeoutThread = Thread {
+            try {
+                while (!Thread.currentThread().isInterrupted) {
+                    Thread.sleep(30_000L) // 每 30 秒检查一次
+
+                    val server = openAIServer ?: return@Thread
+                    val prefs = AppPreferences(this@LlmServerService)
+                    val timeoutMin = kotlinx.coroutines.runBlocking { prefs.idleTimeoutMin.first() }
+                    val timeoutMs = timeoutMin * 60_000L
+                    val idleMs = System.currentTimeMillis() - server.lastActivityTime
+
+                    if (idleMs > timeoutMs) {
+                        Log.i(TAG, "⏱️ 空闲超时 ${timeoutMin} 分钟，自动停止引擎以释放内存")
+                        // 在服务线程中执行停止
+                        stopAll()
+                        updateNotification("💤 空闲超时已自动休眠 | 点击启动重新加载")
+                        return@Thread
+                    }
+                }
+            } catch (e: InterruptedException) {
+                // 正常停止
+            } catch (e: Exception) {
+                Log.w(TAG, "空闲超时检测异常: ${e.message}")
+            }
+        }.also { it.isDaemon = true; it.name = "IdleTimeoutWatcher" }
+        idleTimeoutThread?.start()
     }
 
     // ── 通知管理 ──────────────────────────────────────────

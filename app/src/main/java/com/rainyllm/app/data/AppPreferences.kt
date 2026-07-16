@@ -29,6 +29,7 @@ class AppPreferences(private val context: Context) {
         val KEY_KEEP_ALIVE = booleanPreferencesKey("keep_alive")
         val KEY_FLOATING_WINDOW = booleanPreferencesKey("floating_window")
         val KEY_MODEL_CUSTOM_NAMES = stringPreferencesKey("model_custom_names")
+        val KEY_MODEL_COMMIT_HASHES = stringPreferencesKey("model_commit_hashes")
     }
 
     val serverPort: Flow<Int> = context.dataStore.data.map { it[KEY_PORT] ?: 8080 }
@@ -45,6 +46,7 @@ class AppPreferences(private val context: Context) {
     val keepAlive: Flow<Boolean> = context.dataStore.data.map { it[KEY_KEEP_ALIVE] ?: true }
     val floatingWindowEnabled: Flow<Boolean> = context.dataStore.data.map { it[KEY_FLOATING_WINDOW] ?: true }
     val modelCustomNames: Flow<String> = context.dataStore.data.map { it[KEY_MODEL_CUSTOM_NAMES] ?: "{}" }
+    val modelCommitHashes: Flow<String> = context.dataStore.data.map { it[KEY_MODEL_COMMIT_HASHES] ?: "{}" }
 
     suspend fun setServerPort(port: Int) { context.dataStore.edit { it[KEY_PORT] = port } }
     suspend fun setBackend(backend: String) { context.dataStore.edit { it[KEY_BACKEND] = backend } }
@@ -68,6 +70,29 @@ class AppPreferences(private val context: Context) {
             else map.put(modelId, customName)
             prefs[KEY_MODEL_CUSTOM_NAMES] = map.toString()
         }
+    }
+
+    /** 记录模型下载时的 HuggingFace commit hash */
+    suspend fun setModelCommitHash(modelId: String, commitHash: String) {
+        context.dataStore.edit { prefs ->
+            val json = prefs[KEY_MODEL_COMMIT_HASHES] ?: "{}"
+            val map = try {
+                org.json.JSONObject(json)
+            } catch (_: Exception) { org.json.JSONObject() }
+            map.put(modelId, commitHash)
+            prefs[KEY_MODEL_COMMIT_HASHES] = map.toString()
+        }
+    }
+
+    /** 读取所有模型的本地 commit hash 映射 */
+    suspend fun getModelCommitHashes(): Map<String, String> {
+        val jsonStr = modelCommitHashes.first()
+        return try {
+            val obj = org.json.JSONObject(jsonStr)
+            val map = mutableMapOf<String, String>()
+            obj.keys().forEach { key -> map[key] = obj.getString(key) }
+            map
+        } catch (_: Exception) { emptyMap() }
     }
 
     /**

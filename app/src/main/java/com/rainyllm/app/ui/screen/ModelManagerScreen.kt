@@ -25,6 +25,7 @@ import com.rainyllm.app.model.ModelDownloader
 import com.rainyllm.app.model.ModelInfo
 import com.rainyllm.app.model.ModelRepository
 import com.rainyllm.app.model.ModelValidator
+import com.rainyllm.app.model.ModelUpdateChecker
 import com.rainyllm.app.ui.component.ModelDownloadCard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -57,6 +58,11 @@ fun ModelManagerScreen(isVisible: Boolean = true) {
     var storageWarning by remember { mutableStateOf<String?>(null) }
     var importMessage by remember { mutableStateOf<String?>(null) }
 
+    // ── 模型更新检测 ──
+    var modelUpdates by remember { mutableStateOf(setOf<String>()) }
+    var isCheckingUpdates by remember { mutableStateOf(false) }
+    var updateCheckMessage by remember { mutableStateOf<String?>(null) }
+
     // ── 自定义模型名 ──
     var customNames by remember { mutableStateOf(mapOf<String, String>()) }
     var renameModelId by remember { mutableStateOf<String?>(null) }
@@ -74,6 +80,51 @@ fun ModelManagerScreen(isVisible: Boolean = true) {
 
     fun isCustomModel(modelId: String): Boolean =
         ModelInfo.PRESET_MODELS.none { it.id == modelId }
+
+    // ── 更新检测：查 HuggingFace API 对比 commit hash ──
+    fun checkModelUpdates() {
+        if (isCheckingUpdates) return
+        isCheckingUpdates = true
+        updateCheckMessage = "⏳ 正在检查模型更新…"
+        scope.launch {
+            val localCommits = prefs.getModelCommitHashes()
+            val downloadedModels = models.filter { it.isDownloaded && !isCustomModel(it.modelInfo.id) }
+            if (downloadedModels.isEmpty()) {
+                isCheckingUpdates = false
+                updateCheckMessage = "没有已下载的预置模型需要检查"
+                return@launch
+            }
+            val results = withContext(Dispatchers.IO) {
+                ModelUpdateChecker.checkUpdates(
+                    downloadedModels.map { it.modelInfo },
+                    localCommits
+                )
+            }
+            val updatedIds = results.filter { it.hasUpdate }.map { it.modelId }.toSet()
+            modelUpdates = updatedIds
+
+            // 把最新 commit hash 存下来（即使用户没更新，也刷新记录）
+            results.forEach { r ->
+                if (r.latestCommit != null && r.error == null) {
+                    // 只有本地已有记录的才需要判断更新；没记录的说明是首次检测
+                    val hasLocalRecord = localCommits.containsKey(r.modelId)
+                    if (hasLocalRecord && r.hasUpdate) {
+                        // 有更新，不覆盖本地记录（等用户重新下载后再更新）
+                    } else if (!hasLocalRecord) {
+                        // 首次检测，记录当前 commit（说明用户下载的就是这个版本）
+                        prefs.setModelCommitHash(r.modelId, r.latestCommit)
+                    }
+                }
+            }
+
+            isCheckingUpdates = false
+            updateCheckMessage = when {
+                updatedIds.isEmpty() -> "✅ 所有模型均为最新版本"
+                updatedIds.size == 1 -> "🔄 ${updatedIds.first()} 有可用更新"
+                else -> "🔄 ${updatedIds.size} 个模型有可用更新"
+            }
+        }
+    }
 
     // ── 文件选择器：导入 ──
     val importLauncher = rememberLauncherForActivityResult(
@@ -181,12 +232,36 @@ fun ModelManagerScreen(isVisible: Boolean = true) {
                     storageWarning = null
 
                     if (validation is com.rainyllm.app.model.ValidationResult.Mismatch) {
-                        storageWarning = "⚠️ 哎呀喵！校验失败啦，麻烦主人重新下载一下嘛~"
+                        // ★ 修复：SHA256 不匹配时改为软警告而非阻止使用
+                        // 原因：HuggingFace resolve/main URL 可能已更新文件，旧 SHA256 不再适用
+                        storageWarning = "⚠️ 校验值不匹配 — 文件可能已更新。仍可使用，如有异常请重新下载。"
+                        // 仍然自动选中新模型
+                        selectedModelId = modelId
+                        scope.launch { prefs.setSelectedModel(modelId) }
+                        importMessage = "✅ ${modelInfo?.name ?: modelId} 已下载（校验值不匹配但可用）喵~"
+                        // ★ 记录下载时的 commit hash（用于后续更新检测）
+                        scope.launch {
+                            val commit = withContext(Dispatchers.IO) {
+                                ModelUpdateChecker.fetchLatestCommit(modelInfo ?: return@withContext null)
+                            }
+                            if (commit != null) prefs.setModelCommitHash(modelId, commit)
+                        }
+                        // 清除该模型的更新标记
+                        modelUpdates = modelUpdates - modelId
                     } else {
                         // ✅ 下载校验成功后，自动切换到新模型
                         selectedModelId = modelId
                         scope.launch { prefs.setSelectedModel(modelId) }
                         importMessage = "✅ ${modelInfo?.name ?: modelId} 已下载并自动选中喵~"
+                        // ★ 记录下载时的 commit hash（用于后续更新检测）
+                        scope.launch {
+                            val commit = withContext(Dispatchers.IO) {
+                                ModelUpdateChecker.fetchLatestCommit(modelInfo ?: return@withContext null)
+                            }
+                            if (commit != null) prefs.setModelCommitHash(modelId, commit)
+                        }
+                        // 清除该模型的更新标记
+                        modelUpdates = modelUpdates - modelId
                     }
                 } else if (progress < 0) {
                     downloadingIds = downloadingIds - modelId
@@ -207,16 +282,33 @@ fun ModelManagerScreen(isVisible: Boolean = true) {
     ) {
         Text("📦 雨晴的模型小仓库", style = MaterialTheme.typography.headlineSmall)
 
-        // 操作栏：重新扫描 + 导入按钮
+        // 操作栏：重新扫描 + 检查更新 + 导入按钮
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = {
-                models = repo.getAllModels()
-                importMessage = "🔍 已重新扫描模型列表喵~"
-            }) {
-                Icon(Icons.Default.Refresh, contentDescription = "重新扫描")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = {
+                    models = repo.getAllModels()
+                    importMessage = "🔍 已重新扫描模型列表喵~"
+                }) {
+                    Icon(Icons.Default.Refresh, contentDescription = "重新扫描")
+                }
+                // ★ 检查更新按钮
+                TextButton(
+                    onClick = { checkModelUpdates() },
+                    enabled = !isCheckingUpdates
+                ) {
+                    if (isCheckingUpdates) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text("🔄 检查更新", style = MaterialTheme.typography.labelMedium)
+                }
             }
             OutlinedButton(onClick = {
                 importLauncher.launch(arrayOf("application/octet-stream", "*/*"))
@@ -224,6 +316,32 @@ fun ModelManagerScreen(isVisible: Boolean = true) {
                 Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("导入模型")
+            }
+        }
+
+        // 更新检测状态消息
+        if (updateCheckMessage != null) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (updateCheckMessage!!.startsWith("🔄"))
+                        MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
+                    else if (updateCheckMessage!!.startsWith("❌"))
+                        MaterialTheme.colorScheme.errorContainer
+                    else
+                        MaterialTheme.colorScheme.secondaryContainer
+                )
+            ) {
+                Text(
+                    text = updateCheckMessage!!,
+                    modifier = Modifier.padding(12.dp),
+                    color = if (updateCheckMessage!!.startsWith("🔄"))
+                        MaterialTheme.colorScheme.onTertiaryContainer
+                    else if (updateCheckMessage!!.startsWith("❌"))
+                        MaterialTheme.colorScheme.onErrorContainer
+                    else
+                        MaterialTheme.colorScheme.onSecondaryContainer,
+                    style = MaterialTheme.typography.bodySmall
+                )
             }
         }
 
@@ -282,6 +400,7 @@ fun ModelManagerScreen(isVisible: Boolean = true) {
                     isSelected = modelId == selectedModelId && model.isDownloaded,
                     displayName = customNames[modelId] ?: model.modelInfo.name,
                     isCustom = isCustom,
+                    hasUpdate = modelId in modelUpdates,
                     onRename = {
                         renameModelId = modelId
                         renameText = customNames[modelId] ?: model.modelInfo.name

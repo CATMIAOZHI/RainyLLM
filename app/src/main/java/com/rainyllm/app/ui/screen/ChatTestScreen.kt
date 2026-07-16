@@ -149,7 +149,12 @@ fun ChatTestScreen(
         initError = "应用初始化中，请稍后重试喵~\n${e.message}"
         ""
     }
-    val effectiveCacheDir = cacheDir.ifEmpty { context.cacheDir.path }
+    val effectiveCacheDir = cacheDir.ifEmpty {
+        // ★ 修复：使用版本化缓存子目录，与 LlmServerService 保持一致
+        val versioned = java.io.File(context.cacheDir, "litertlm-v0.14.0")
+        if (!versioned.exists()) versioned.mkdirs()
+        versioned.absolutePath
+    }
 
     // engineKey 变化时：关闭旧引擎 → 加载新引擎（engineKey <0 时不执行）
     DisposableEffect(engineKey) {

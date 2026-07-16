@@ -32,10 +32,30 @@ jobs:
           echo "RELEASE_KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
           echo "RELEASE_KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
 
+      # ★ 修复：从 git tag 自动提取 versionName（如 v1.2.0 → 1.2.0）
+      - name: Set Version from Tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "Tag version: $TAG"
+          # 更新 build.gradle.kts 中的 versionName
+          sed -i "s/versionName = \".*\"/versionName = \"$TAG\"/" app/build.gradle.kts
+          # 从 tag 提取 versionCode：主版本*10000 + 次版本*100 + 补丁版本
+          MAJOR=$(echo "$TAG" | cut -d. -f1)
+          MINOR=$(echo "$TAG" | cut -d. -f2)
+          PATCH=$(echo "$TAG" | cut -d. -f3)
+          PATCH=${PATCH:-0}
+          VCODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+          sed -i "s/versionCode = [0-9]*/versionCode = $VCODE/" app/build.gradle.kts
+          echo "Set versionCode=$VCODE, versionName=$TAG"
+
       - run: chmod +x gradlew
 
       - name: Fix Gradle Wrapper URL
-        run: sed -i 's|https\\://mirrors.huaweicloud.com/gradle/gradle-.*-bin.zip|https://services.gradle.org/distributions/gradle-9.1.0-bin.zip|' gradle/wrapper/gradle-wrapper.properties
+        run: sed -i 's|https\://mirrors.huaweicloud.com/gradle/gradle-.*-bin.zip|https://services.gradle.org/distributions/gradle-9.1.0-bin.zip|' gradle/wrapper/gradle-wrapper.properties
+
+      # ★ 运行单元测试，构建前验证
+      - name: Run Unit Tests
+        run: ./gradlew testDebugUnitTest
 
       - run: ./gradlew assembleRelease
 

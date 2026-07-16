@@ -424,8 +424,9 @@ fun DashboardScreen(isVisible: Boolean = true) {
             Text(
                 text = "💡 ChatBox / Open WebUI 设置:\n" +
                        "   API 地址: http://127.0.0.1:$port\n" +
-                       "   API Key: 任意值（留空即可）\n" +
-                       "   模型: $selectedModel",
+                       "   API Key: 任意值（无需鉴权）\n" +
+                       "   模型: 任意名称均可（实际由 App 选择）\n" +
+                       "   响应中的 model 字段报告实际运行模型",
                 modifier = Modifier.padding(12.dp),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSecondaryContainer

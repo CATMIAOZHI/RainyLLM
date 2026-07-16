@@ -16,7 +16,7 @@
 | 🌐 **OpenAI 兼容 API** | `/v1/chat/completions` · `/v1/models` · `/health` |
 | 📡 **SSE 流式输出** | 原生支持 `stream: true`，逐 token 流式推送到客户端 |
 | 🖼️ **多模态** | 支持图片 (ImageBytes/ImageFile) + 音频 (AudioBytes) 输入 |
-| 🎛️ **GPU 加速** | CPU / GPU 后端可切换，GPU prefill 可达 3808 tk/s |
+| 🎛️ **GPU 加速** | CPU / GPU 后端可切换，GPU prefill 可达 3808 tk/s（S26 Ultra + Gemma4 E2B 实测，解码约 52 tk/s，实际速度因设备而异） |
 | 🔒 **纯本地 · 零联网** | 127.0.0.1 绑定，不暴露到局域网，隐私安全 |
 | 📊 **实时统计** | 请求日志、Token 用量图表、引擎诊断面板 |
 | 🪟 **实时悬浮窗** | 可拖动/最小化的全局悬浮窗，粉色主题，通知栏快捷控制 |
@@ -66,7 +66,7 @@
 │  ┌────────────────────▼─────────────────────────┐ │
 │  │      推理引擎 (LiteRT-LM Kotlin API)          │ │
 │  │  Engine → Conversation → sendMessageAsync()  │ │
-│  │  · GPU 加速（3808 tk/s prefill）             │ │
+│  │  · GPU 加速（3808 tk/s prefill, S26 Ultra 实测）  │ │
 │  │  · Kotlin Flow 流式输出                       │ │
 │  └────────────────────┬─────────────────────────┘ │
 │                       │                            │
@@ -243,6 +243,8 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
 - ✅ `allowBackup="false"`，拒绝应用数据被备份
 - ✅ 纯离线运行，**零网络请求**（模型下载除外）
 - ✅ 签名密钥由 GitHub Actions 在 CI 中安全生成并发布 Release APK
+- ✅ 请求体大小限制 10MB，防止超大请求导致 OOM
+- ✅ 空闲超时自动休眠引擎，降低后台功耗
 
 ---
 
@@ -253,7 +255,8 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
 | 🧠 模型大小 | Gemma4-E2B 约 2.58GB，需充足存储 |
 | 📱 内存需求 | 推荐 8GB+ RAM，推理时约占用 2-3GB |
 | ⏱️ 冷启动 | `engine.initialize()` 约 10 秒，需异步执行 |
-| 🔋 电量 | 持续推理会耗电发热，有空闲超时机制 |
+| 🔋 电量 | 持续推理会耗电发热，空闲超时自动休眠引擎 |
+| 🧠 模型校验 | SHA256 校验 — 不匹配时软警告而非阻止（HuggingFace 文件可能已更新） |
 | 📡 纯本地 | 127.0.0.1 不对局域网开放 |
 
 ---

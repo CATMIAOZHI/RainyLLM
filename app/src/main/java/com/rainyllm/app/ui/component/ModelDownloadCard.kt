@@ -29,6 +29,7 @@ fun ModelDownloadCard(
     isSelected: Boolean,
     displayName: String = model.modelInfo.name,
     isCustom: Boolean = false,
+    hasUpdate: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -77,6 +78,14 @@ fun ModelDownloadCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                if (hasUpdate && model.isDownloaded) {
+                    Text(
+                        text = "🔄 远端有更新，建议重新下载",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
                 if (model.modelInfo.description.isNotEmpty()) {
                     Text(
                         text = model.modelInfo.description,
@@ -107,6 +116,16 @@ fun ModelDownloadCard(
                     var menuExpanded by remember { mutableStateOf(false) }
                     if (isSelected) {
                         Text("🌟", style = MaterialTheme.typography.titleMedium)
+                    }
+                    if (hasUpdate) {
+                        TextButton(
+                            onClick = onDownload,
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            modifier = Modifier.height(36.dp)
+                        ) {
+                            Text("🔄 更新", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.tertiary)
+                        }
                     }
                     TextButton(onClick = onSelect) {
                         Text(if (isSelected) "使用中" else "选用")

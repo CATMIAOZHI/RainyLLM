@@ -291,13 +291,13 @@ fun SettingsScreen() {
                     }
                 },
                 label = { Text("空闲超时（分钟）") },
-                supportingText = { Text("1 – 60 分钟 | ⚠️ 需重启服务器生效") },
+                supportingText = { Text("1 – 60 分钟 | 无请求后自动休眠引擎") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier.fillMaxWidth()
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                "💡 HTTP 服务器模式下，客户端会话超过此时长无活动将自动释放内存。",
+                "💡 服务器无请求超过此时长后，自动卸载引擎释放内存。\n下次启动服务时重新加载模型。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
             )
@@ -398,7 +398,7 @@ fun SettingsScreen() {
         val uriHandler = LocalUriHandler.current
         SettingsSection("ℹ️ 关于 RainyLLM") {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                AboutRow("版本", "1.0.0")
+                AboutRow("版本", "1.2.0")
                 AboutRow("推理引擎", "LiteRT-LM (Google AI Edge)")
                 AboutRow("模型", "Gemma 4 E2B / E4B")
                 AboutRow("HTTP 服务", "NanoHTTPd 2.3.1")

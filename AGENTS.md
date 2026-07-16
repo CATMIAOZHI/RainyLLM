@@ -6,7 +6,7 @@
 
 | 层 | 技术 |
 |----|------|
-| 推理引擎 | `com.google.ai.edge.litertlm:litertlm-android` |
+| 推理引擎 | `com.google.ai.edge.litertlm:litertlm-android` v0.14.0 |
 | HTTP | `org.nanohttpd:nanohttpd:2.3.1` |
 | UI | Jetpack Compose + Material 3（元气猫系粉色主题） |
 | 存储 | DataStore Preferences |

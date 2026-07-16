@@ -10,7 +10,7 @@ import java.io.IOException
 
 /**
  * LiteRT-LM 推理引擎封装
- * 依据官方 API（v0.10.x）：EngineConfig / ConversationConfig / SamplerConfig 均为 data class
+ * 依据官方 API（v0.14.x）：EngineConfig / ConversationConfig / SamplerConfig 均为 data class
  */
 class LlmEngine(
     private val modelPath: String,

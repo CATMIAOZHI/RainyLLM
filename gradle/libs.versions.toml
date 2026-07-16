@@ -8,13 +8,14 @@ espressoCore = "3.5.1"
 lifecycleRuntimeKtx = "2.8.7"
 activityCompose = "1.8.0"
 composeBom = "2026.01.01"
-litertlm = "0.10.2"
+litertlm = "0.14.0"
 nanohttpd = "2.3.1"
-kotlinxCoroutines = "1.9.0"
+kotlinxCoroutines = "1.11.0"
 navigationCompose = "2.9.6"
 datastorePreferences = "1.0.0"
 coil = "2.7.0"
 desugarJdkLibs = "2.1.5"
+orgJson = "20240303"
 
 [libraries]
 litertlm-android = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litertlm" }
@@ -39,6 +40,7 @@ androidx-material3 = { group = "androidx.compose.material3", name = "material3" 
 androidx-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
 desugar-jdk-libs = { group = "com.android.tools", name = "desugar_jdk_libs", version.ref = "desugarJdkLibs" }
+org-json = { group = "org.json", name = "json", version.ref = "orgJson" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

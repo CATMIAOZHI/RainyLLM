@@ -57,7 +57,8 @@ object SseFormatter {
         model: String,
         created: Long,
         promptTokens: Int,
-        completionTokens: Int
+        completionTokens: Int,
+        finishReason: String = "stop"
     ): String {
         val json = JSONObject().apply {
             put("id", id)
@@ -67,7 +68,7 @@ object SseFormatter {
             put("choices", JSONArray().put(JSONObject().apply {
                 put("index", 0)
                 put("delta", JSONObject())
-                put("finish_reason", "stop")
+                put("finish_reason", finishReason)
             }))
             put("usage", JSONObject().apply {
                 put("prompt_tokens", promptTokens)

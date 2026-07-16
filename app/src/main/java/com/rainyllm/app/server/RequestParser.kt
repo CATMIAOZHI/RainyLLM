@@ -34,7 +34,15 @@ object RequestParser {
         if (root.has("stream")) result["stream"] = root.optBoolean("stream", false)
         if (root.has("user")) result["user"] = root.optString("user", "")
         if (root.has("tools")) result["tools"] = parseTools(root.optJSONArray("tools"))
-        if (root.has("tool_choice")) result["tool_choice"] = root.optString("tool_choice", "auto")
+        if (root.has("tool_choice")) {
+            // tool_choice 可以是 "auto"/"none"/"required" 字符串，也可以是 {"type":"function","function":{"name":"xxx"}} 对象
+            val tc = root.opt("tool_choice")
+            result["tool_choice"] = when (tc) {
+                is String -> tc
+                is JSONObject -> tc.toString()
+                else -> "auto"
+            }
+        }
 
         return result
     }

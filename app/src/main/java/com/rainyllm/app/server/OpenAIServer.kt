@@ -36,7 +36,9 @@ class OpenAIServer(
     private val modelId: String = "gemma4-e2b",
     private val defaultSamplerConfig: SamplerConfig? = null,
     /** 动态读取最新 SamplerConfig 的供应商（优先于 defaultSamplerConfig） */
-    private val samplerConfigSupplier: (() -> SamplerConfig)? = null
+    private val samplerConfigSupplier: (() -> SamplerConfig)? = null,
+    /** 请求体最大字节数，超过返回 413 */
+    private val maxBodySize: Int = 10 * 1024 * 1024
 ) : NanoHTTPD("127.0.0.1", port) {
 
     companion object {
@@ -75,6 +77,11 @@ class OpenAIServer(
     var lastErrorDetail: String? = null
         private set
 
+    /** 最近一次请求时间戳（供 LlmServerService 实现空闲超时） */
+    @Volatile
+    var lastActivityTime: Long = System.currentTimeMillis()
+        private set
+
     val serverPort: Int get() = port
     val isServerRunning: Boolean get() = isRunning
 
@@ -103,6 +110,9 @@ class OpenAIServer(
         val startTime = System.currentTimeMillis()
         val method = session.method
         val uri = session.uri
+
+        // 更新活动时间（供空闲超时判断）
+        lastActivityTime = System.currentTimeMillis()
 
         // 不在此处 parseBody —— NanoHTTPd 的 parseBody 只能调用一次，
         // 交给具体 handler 调用，否则 handler 内部再调会读到空流导致 500
@@ -184,6 +194,15 @@ class OpenAIServer(
     }
 
     private fun handleChatCompletion(session: IHTTPSession): Response {
+        // ★ 修复：在读取前检查 Content-Length，超限直接返回 413
+        val cl = session.headers["content-length"]?.toIntOrNull() ?: 0
+        if (cl > maxBodySize) {
+            Log.w(TAG, "请求体过大: $cl bytes > $maxBodySize, 拒绝")
+            val resp = newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json",
+                """{"error":{"message":"Request body too large: $cl bytes (max $maxBodySize). Reduce input or image/audio size."},"type":"request_too_large"}""")
+            return resp
+        }
+
         val bodyJson = parseBodyUtf8(session)
         if (bodyJson.isBlank())
             return jsonResponse(Response.Status.BAD_REQUEST,
@@ -194,8 +213,15 @@ class OpenAIServer(
         val request = RequestParser.parseChatCompletionRequest(bodyJson)
         val isStream = request["stream"] as? Boolean ?: false
 
-        val requestModel = (request["model"] as? String)?.takeUnless { it.isBlank() }
-        val responseModel = requestModel ?: modelId
+        // ★ 修复：响应始终报告实际运行模型，而非客户端传入的模型名
+        // 设计意图：客户端可传任意模型名（实际模型在 App 中选择），但响应必须诚实
+        val responseModel = modelId
+
+        // ★ 修复：解析 tool_choice — "none" 时不传工具给引擎
+        val toolChoice = request["tool_choice"] as? String ?: "auto"
+
+        // ★ 修复：解析 max_tokens — 用于限制单次输出长度（OpenAI 语义）
+        val requestMaxTokens = (request["max_tokens"] as? Number)?.toInt()
 
         val requestSamplerConfig = buildRequestSamplerConfig(request)
 
@@ -209,6 +235,9 @@ class OpenAIServer(
                 parametersJson = fn["parameters"]?.toString() ?: "{}"
             ).let { tool(it) }
         }?.takeUnless { it.isEmpty() }
+
+        // tool_choice="none" → 不传工具给引擎（引擎不会生成 tool_calls）
+        val effectiveTools = if (toolChoice == "none") null else lmTools
 
         // ── 解析 messages 数组 ──
         val allMessages = (request["messages"] as? List<Map<String, Any>>) ?: emptyList()
@@ -320,10 +349,10 @@ class OpenAIServer(
 
         return if (isStream) {
             handleStreamResponse(prompt, systemPrompt, promptTokens, multimodalContents,
-                responseModel, requestSamplerConfig, historyLm, lmTools)
+                responseModel, requestSamplerConfig, historyLm, effectiveTools, requestMaxTokens)
         } else {
             handleSyncResponse(prompt, systemPrompt, promptTokens, multimodalContents,
-                responseModel, requestSamplerConfig, historyLm, lmTools)
+                responseModel, requestSamplerConfig, historyLm, effectiveTools, requestMaxTokens)
         }
     }
 
@@ -427,7 +456,8 @@ private fun handleSyncResponse(
         responseModel: String = modelId,
         requestSamplerConfig: SamplerConfig? = null,
         historyMessages: List<com.google.ai.edge.litertlm.Message> = emptyList(),
-        tools: List<com.google.ai.edge.litertlm.ToolProvider>? = null
+        tools: List<com.google.ai.edge.litertlm.ToolProvider>? = null,
+        requestMaxTokens: Int? = null
     ): Response {
         val syncStart = System.currentTimeMillis()
         return try {
@@ -497,17 +527,32 @@ private fun handleSyncResponse(
                 TokenEstimator.estimateMultimodalPromptTokens(prompt, counts)
             } else promptTokens
 
+            // ★ 修复：应用 max_tokens 截断（OpenAI 语义 — 限制单次最大输出 token 数）
+            var truncatedResult = result
+            var finishReason = if (toolCallsData != null) "tool_calls" else "stop"
+            if (toolCallsData == null && requestMaxTokens != null && requestMaxTokens > 0) {
+                val estimatedCompletion = TokenEstimator.estimateCompletionTokens(result)
+                if (estimatedCompletion > requestMaxTokens) {
+                    // 粗略截断：按平均 3.5 字符/token 估算
+                    val charLimit = (requestMaxTokens * 3.5).toInt().coerceAtLeast(1)
+                    truncatedResult = result.take(charLimit)
+                    finishReason = "length"
+                    Log.i(TAG, "max_tokens 截断: 估算 $estimatedCompletion > $requestMaxTokens, 截断到 ${truncatedResult.length} 字符")
+                }
+            }
+
             val finalCompletionTokens = if (actualCompletionTokens > 0)
                 actualCompletionTokens
             else
-                TokenEstimator.estimateCompletionTokens(result)
+                TokenEstimator.estimateCompletionTokens(truncatedResult)
 
             val responseJson = buildChatResponseJson(
-                content = if (toolCallsData != null) null else result,
+                content = if (toolCallsData != null) null else truncatedResult,
                 model = responseModel,
                 promptTokens = finalPromptTokens,
                 completionTokens = finalCompletionTokens,
-                toolCalls = toolCallsData
+                toolCalls = toolCallsData,
+                finishReason = finishReason
             )
 
             val durationMs = System.currentTimeMillis() - syncStart
@@ -544,7 +589,8 @@ private fun handleSyncResponse(
         responseModel: String = modelId,
         requestSamplerConfig: SamplerConfig? = null,
         historyMessages: List<com.google.ai.edge.litertlm.Message> = emptyList(),
-        tools: List<com.google.ai.edge.litertlm.ToolProvider>? = null
+        tools: List<com.google.ai.edge.litertlm.ToolProvider>? = null,
+        requestMaxTokens: Int? = null
     ): Response {
         val sampler = requestSamplerConfig ?: samplerConfigSupplier?.invoke() ?: defaultSamplerConfig
         val config = ConversationConfig(
@@ -579,11 +625,11 @@ private fun handleSyncResponse(
 
                 var totalResponseText = ""
                 var lastMessage: com.google.ai.edge.litertlm.Message? = null
+                val id = "chatcmpl-${UUID.randomUUID().toString().take(8)}"
+                val created = Instant.now().epochSecond
+                var streamFinishReason = "stop"
 
                 try {
-                    val id = "chatcmpl-${UUID.randomUUID().toString().take(8)}"
-                    val created = Instant.now().epochSecond
-
                     writeSseFrame(outputStream,
                         SseFormatter.buildSseChunk(id, responseModel, created, "assistant", null))
 
@@ -601,12 +647,23 @@ private fun handleSyncResponse(
                                 totalResponseText += text
                                 writeSseFrame(outputStream,
                                     SseFormatter.buildSseChunk(id, responseModel, created, null, text))
+
+                                // ★ 修复：max_tokens 流式截断 — 达到限制后停止收集
+                                if (requestMaxTokens != null && requestMaxTokens > 0) {
+                                    val estimatedTokens = TokenEstimator.estimateCompletionTokens(totalResponseText)
+                                    if (estimatedTokens >= requestMaxTokens) {
+                                        streamFinishReason = "length"
+                                        Log.i(TAG, "max_tokens 流式截断: $estimatedTokens >= $requestMaxTokens")
+                                        throw kotlinx.coroutines.CancellationException("max_tokens_reached")
+                                    }
+                                }
                             }
                         }
 
                         // ★ 检测 tool_calls — 若有则在流中发送
                         val streamToolCalls = lastMessage?.toolCalls?.takeIf { it.isNotEmpty() }
                         if (streamToolCalls != null) {
+                            streamFinishReason = "tool_calls"
                             writeSseFrame(outputStream,
                                 SseFormatter.buildSseToolCalls(id, responseModel, created, streamToolCalls))
                         }
@@ -618,7 +675,7 @@ private fun handleSyncResponse(
                         val finalPromptTokens = if (actualPrefill > 0) actualPrefill else promptTokens
 
                         writeSseFrame(outputStream,
-                            SseFormatter.buildSseDone(id, responseModel, created, finalPromptTokens, finalCompletionTokens))
+                            SseFormatter.buildSseDone(id, responseModel, created, finalPromptTokens, finalCompletionTokens, streamFinishReason))
 
                         stats.addRequest(finalPromptTokens, finalCompletionTokens)
                         val elapsed = System.currentTimeMillis() - streamStart
@@ -642,6 +699,36 @@ private fun handleSyncResponse(
                     }
                 } catch (e: IOException) {
                     Log.d(TAG, "SSE 客户端断开连接")
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // max_tokens 截断触发的正常停止，非错误
+                    Log.i(TAG, "SSE 流式因 ${e.message} 停止（正常截断）")
+                    // 发送 done 帧以确保客户端正常结束
+                    try {
+                        val actualDecode = getBenchmarkTokenCount(conversation) { it.lastDecodeTokenCount }
+                        val actualPrefill = getBenchmarkTokenCount(conversation) { it.lastPrefillTokenCount }
+                        val finalCompletionTokens = if (actualDecode > 0) actualDecode
+                            else TokenEstimator.estimateCompletionTokens(totalResponseText)
+                        val finalPromptTokens = if (actualPrefill > 0) actualPrefill else promptTokens
+                        writeSseFrame(outputStream,
+                            SseFormatter.buildSseDone(id, responseModel, created, finalPromptTokens, finalCompletionTokens, streamFinishReason))
+                        stats.addRequest(finalPromptTokens, finalCompletionTokens)
+                        val elapsed = System.currentTimeMillis() - streamStart
+                        StatsRepository.instance?.addRecord(
+                            StatsRepository.InferenceRecord(
+                                timestamp = System.currentTimeMillis(),
+                                model = responseModel,
+                                promptTokens = finalPromptTokens,
+                                completionTokens = finalCompletionTokens,
+                                durationMs = elapsed
+                            )
+                        )
+                        if (sseLogIndex >= 0) {
+                            setLogEntryAt(sseLogIndex,
+                                "SSE 流式 · ${finalCompletionTokens} tokens (max_tokens 截断)" +
+                                    if (totalResponseText.isNotEmpty()) "\n\n$totalResponseText" else "",
+                                elapsed, finalPromptTokens, finalCompletionTokens)
+                        }
+                    } catch (_: Exception) {}
                 } catch (e: Exception) {
                     lastErrorDetail = "SSE流式失败 · ${e.javaClass.simpleName} · ${e.message}\n${e.stackTraceToString().take(800)}"
                     Log.e(TAG, lastErrorDetail, e)
@@ -687,16 +774,22 @@ private fun handleSyncResponse(
 
     /**
      * 用 UTF-8 读取请求体（绕过 NanoHTTPd parseBody 的默认编码问题）。
-     * 优先按 Content-Length 读，缺失则读取最多 1MB。
+     * 优先按 Content-Length 读，缺失则读取最多 maxBodySize 字节。
+     * 超过 maxBodySize 时返回空字符串（由调用方返回 413）。
      */
     private fun parseBodyUtf8(session: IHTTPSession): String {
         return try {
             val cl = session.headers["content-length"]?.toIntOrNull() ?: 0
+            if (cl > maxBodySize) {
+                Log.w(TAG, "请求体过大: $cl bytes > $maxBodySize, 拒绝")
+                return ""
+            }
             if (cl > 0) {
                 val bytes = session.inputStream.readNBytes(cl)
                 String(bytes, Charsets.UTF_8)
             } else {
-                val bytes = session.inputStream.readBytes()
+                // 无 Content-Length 时限制读取量
+                val bytes = session.inputStream.readNBytes(maxBodySize)
                 if (bytes.isEmpty()) "" else String(bytes, Charsets.UTF_8)
             }
         } catch (e: Exception) {
@@ -716,7 +809,8 @@ private fun handleSyncResponse(
         model: String,
         promptTokens: Int,
         completionTokens: Int,
-        toolCalls: List<ToolCallData>? = null
+        toolCalls: List<ToolCallData>? = null,
+        finishReason: String = if (toolCalls != null) "tool_calls" else "stop"
     ): String {
         val id = "chatcmpl-${UUID.randomUUID().toString().take(8)}"
         val created = Instant.now().epochSecond
@@ -750,7 +844,7 @@ private fun handleSyncResponse(
             put("choices", JSONArray().put(JSONObject().apply {
                 put("index", 0)
                 put("message", messageObj)
-                put("finish_reason", if (toolCalls != null) "tool_calls" else "stop")
+                put("finish_reason", finishReason)
             }))
             put("usage", JSONObject().apply {
                 put("prompt_tokens", promptTokens)
