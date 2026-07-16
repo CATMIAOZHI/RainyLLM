@@ -282,6 +282,37 @@ fun SettingsScreen() {
 
         // 高级设置
         SettingsSection("⏱️ 高级") {
+            // 空闲超时开关
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("空闲超时自动休眠", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "无请求超过设定时长后自动卸载引擎释放内存",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = idleTimeout != 0,
+                    onCheckedChange = { enabled ->
+                        if (enabled) {
+                            // 从关闭切换到开启，恢复为 5 分钟
+                            idleTimeout = 5; idleTimeoutText = "5"
+                            scope.launch { prefs.setIdleTimeoutMin(5) }
+                        } else {
+                            // 关闭
+                            idleTimeout = 0; idleTimeoutText = "0"
+                            scope.launch { prefs.setIdleTimeoutMin(0) }
+                        }
+                    }
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            // 分钟数输入框（关闭时禁用）
             OutlinedTextField(
                 value = idleTimeoutText,
                 onValueChange = { v ->
@@ -291,15 +322,10 @@ fun SettingsScreen() {
                     }
                 },
                 label = { Text("空闲超时（分钟）") },
-                supportingText = { Text("1 – 60 分钟 | 无请求后自动休眠引擎") },
+                supportingText = { Text("1 – 60 分钟") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                enabled = idleTimeout != 0,
                 modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "💡 服务器无请求超过此时长后，自动卸载引擎释放内存。\n下次启动服务时重新加载模型。",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
             )
         }
 

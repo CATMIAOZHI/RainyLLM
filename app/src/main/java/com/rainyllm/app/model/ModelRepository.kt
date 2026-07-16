@@ -160,7 +160,13 @@ class ModelRepository(private val modelsDir: File) {
      */
     fun importModel(sourceFile: File): File? {
         ensureModelsDir()
-        val targetFile = File(modelsDir, sourceFile.name)
+        // ★ 修复：规范化文件名，防止路径穿越
+        val safeName = sourceFile.name
+        val targetFile = File(modelsDir, safeName)
+        require(targetFile.canonicalPath.startsWith(modelsDir.canonicalPath + File.separator) ||
+                targetFile.canonicalPath == modelsDir.canonicalPath) {
+            "目标路径超出模型目录: ${targetFile.canonicalPath}"
+        }
         return try {
             if (sourceFile.absolutePath == targetFile.absolutePath) {
                 // 已经在目标目录中，无需复制
@@ -178,17 +184,27 @@ class ModelRepository(private val modelsDir: File) {
 
     /**
      * 从内容 URI 输入流导入模型
+     * @param fileName 由 DocumentsProvider 返回的文件名，会被规范化以防路径穿越
      */
     fun importModelFromStream(inputStream: java.io.InputStream, fileName: String): File? {
         ensureModelsDir()
-        val targetFile = File(modelsDir, fileName)
+        // ★ 修复：规范化文件名，防止 ../ 或路径分隔符导致的目录穿越
+        val safeName = File(fileName).name
+        require(safeName == fileName) { "文件名包含非法路径分隔符: $fileName" }
+        require(safeName.endsWith(EXT_LITERTLM, ignoreCase = true)) { "只支持 $EXT_LITERTLM 格式: $fileName" }
+        val targetFile = File(modelsDir, safeName)
+        // 二次校验：目标文件必须在 modelsDir 下
+        require(targetFile.canonicalPath.startsWith(modelsDir.canonicalPath + File.separator) ||
+                targetFile.canonicalPath == modelsDir.canonicalPath) {
+            "目标路径超出模型目录: ${targetFile.canonicalPath}"
+        }
         return try {
             inputStream.use { input ->
                 targetFile.outputStream().use { output ->
                     input.copyTo(output)
                 }
             }
-            Log.i(TAG, "模型流导入成功: $fileName")
+            Log.i(TAG, "模型流导入成功: $safeName")
             targetFile
         } catch (e: Exception) {
             Log.e(TAG, "模型流导入失败: ${e.message}", e)

@@ -4,6 +4,11 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号 (格式: 1.2.0 或 1.2.0-beta.1)'
+        required: true
+        type: string
 
 jobs:
   build:
@@ -32,21 +37,34 @@ jobs:
           echo "RELEASE_KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
           echo "RELEASE_KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
 
-      # ★ 修复：从 git tag 自动提取 versionName（如 v1.2.0 → 1.2.0）
+      # ★ 修复：从 git tag 自动提取 versionName，手动触发时用输入参数；带 SemVer 验证
       - name: Set Version from Tag
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          echo "Tag version: $TAG"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.version }}"
+          else
+            TAG="${GITHUB_REF_NAME#v}"
+          fi
+          echo "Version: $TAG"
+          # 验证 SemVer 格式 (主.次.补丁 或 主.次.补丁-预发布)
+          if ! echo "$TAG" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+            echo "❌ 版本号格式无效: $TAG (应为 1.2.0 或 1.2.0-beta.1)"
+            exit 1
+          fi
           # 更新 build.gradle.kts 中的 versionName
           sed -i "s/versionName = \".*\"/versionName = \"$TAG\"/" app/build.gradle.kts
-          # 从 tag 提取 versionCode：主版本*10000 + 次版本*100 + 补丁版本
+          # 从版本号提取 versionCode：主版本*10000 + 次版本*100 + 补丁版本
           MAJOR=$(echo "$TAG" | cut -d. -f1)
           MINOR=$(echo "$TAG" | cut -d. -f2)
-          PATCH=$(echo "$TAG" | cut -d. -f3)
+          PATCH_FULL=$(echo "$TAG" | cut -d. -f3)
+          # 补丁版本可能带 -beta.1 后缀，只取数字部分
+          PATCH=$(echo "$PATCH_FULL" | grep -oE '^[0-9+' | head -1)
           PATCH=${PATCH:-0}
           VCODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
           sed -i "s/versionCode = [0-9]*/versionCode = $VCODE/" app/build.gradle.kts
           echo "Set versionCode=$VCODE, versionName=$TAG"
+          # 保存版本号供后续步骤使用
+          echo "VERSION=$TAG" >> $GITHUB_ENV
 
       - run: chmod +x gradlew
 
@@ -60,14 +78,15 @@ jobs:
       - run: ./gradlew assembleRelease
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/release/app-release.apk "RainyLLM-${{ github.ref_name }}.apk"
+        run: cp app/build/outputs/apk/release/app-release.apk "RainyLLM-${{ env.VERSION }}.apk"
 
       - name: Create Release & Upload
         uses: softprops/action-gh-release@v2
         with:
-          name: "🎉 RainyLLM ${{ github.ref_name }}"
+          tag_name: "v${{ env.VERSION }}"
+          name: "🎉 RainyLLM v${{ env.VERSION }}"
           body: |
-            ## 🎉 RainyLLM ${{ github.ref_name }}
+            ## 🎉 RainyLLM v${{ env.VERSION }}
 
             Android 本地 LLM 推理服务器 — 在手机上跑 Gemma，开放 OpenAI 兼容 API。
 
@@ -79,6 +98,6 @@ jobs:
             ### ⚠️ 注意
             - 模型文件需在 App 内单独下载（Gemma4-E2B 约 2.58GB）
             - 推荐 8GB+ RAM 设备
-          files: RainyLLM-${{ github.ref_name }}.apk
+          files: RainyLLM-${{ env.VERSION }}.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

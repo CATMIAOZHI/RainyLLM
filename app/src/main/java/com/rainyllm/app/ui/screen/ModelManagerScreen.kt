@@ -232,13 +232,12 @@ fun ModelManagerScreen(isVisible: Boolean = true) {
                     storageWarning = null
 
                     if (validation is com.rainyllm.app.model.ValidationResult.Mismatch) {
-                        // ★ 修复：SHA256 不匹配时改为软警告而非阻止使用
-                        // 原因：HuggingFace resolve/main URL 可能已更新文件，旧 SHA256 不再适用
-                        storageWarning = "⚠️ 校验值不匹配 — 文件可能已更新。仍可使用，如有异常请重新下载。"
-                        // 仍然自动选中新模型
-                        selectedModelId = modelId
-                        scope.launch { prefs.setSelectedModel(modelId) }
-                        importMessage = "✅ ${modelInfo?.name ?: modelId} 已下载（校验值不匹配但可用）喵~"
+                        // ★ 修复：SHA256 不匹配时不自动选中，显示警告并展示哈希前 16 位，等用户确认
+                        val expectedShort = modelInfo?.sha256?.take(16) ?: "?"
+                        val actualShort = (validation as com.rainyllm.app.model.ValidationResult.Mismatch).actual.take(16)
+                        storageWarning = "⚠️ 校验值不匹配！\n预期 SHA256: ${expectedShort}...\n实际 SHA256: ${actualShort}...\n文件可能已损坏或被替换。如有异常请重新下载。"
+                        importMessage = "⚠️ ${modelInfo?.name ?: modelId} 已下载但校验不匹配，请检查后手动选择。"
+                        // 不自动选中，让用户决定
                         // ★ 记录下载时的 commit hash（用于后续更新检测）
                         scope.launch {
                             val commit = withContext(Dispatchers.IO) {

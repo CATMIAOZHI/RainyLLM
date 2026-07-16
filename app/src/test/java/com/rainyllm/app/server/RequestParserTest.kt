@@ -180,4 +180,70 @@ class RequestParserTest {
         val result = RequestParser.parseChatCompletionRequest(body)
         assertEquals("user123", result["user"])
     }
+
+    // ★ 回归测试：多轮 tool calling 上下文 — 验证 tool_calls 被正确解析为 List<Map<String, Any>>
+    // 修复前：msg.get("tool_calls") 返回 JSONArray，后续 as? List<Map<String, Any>> cast 失败 → toolNameMap 为空
+    // 修复后：手动解析 JSONArray 为 List<Map<String, Any>>，cast 成功 → 工具名正确映射
+    @Test
+    fun toolCalls_parsedAsListMap() {
+        val body = """{"messages":[
+            {"role":"user","content":"What's the weather in Paris?"},
+            {"role":"assistant","content":null,"tool_calls":[
+                {"id":"call_abc123","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}
+            ]},
+            {"role":"tool","content":"{\"temp\":22,\"condition\":\"sunny\"}","tool_call_id":"call_abc123"},
+            {"role":"user","content":"Thanks!"}
+        ]}"""
+        val result = RequestParser.parseChatCompletionRequest(body)
+        @Suppress("UNCHECKED_CAST")
+        val messages = result["messages"] as List<Map<String, Any>>
+
+        // 验证 assistant 消息的 tool_calls 是 List<Map<String, Any>> 而非 JSONArray
+        val assistantMsg = messages[1]
+        assertEquals("assistant", assistantMsg["role"])
+        val toolCalls = assistantMsg["tool_calls"]
+        assertNotNull("tool_calls 不应为 null", toolCalls)
+        assertTrue("tool_calls 应为 List<*>", toolCalls is List<*>)
+
+        @Suppress("UNCHECKED_CAST")
+        val tcList = toolCalls as List<Map<String, Any>>
+        assertEquals(1, tcList.size)
+
+        val tc = tcList[0]
+        assertEquals("call_abc123", tc["id"])
+        assertEquals("function", tc["type"])
+
+        @Suppress("UNCHECKED_CAST")
+        val fn = tc["function"] as Map<String, Any>
+        assertEquals("get_weather", fn["name"])
+        assertEquals("""{"city":"Paris"}""", fn["arguments"])
+    }
+
+    @Test
+    fun toolCalls_multipleRounds_parsedCorrectly() {
+        val body = """{"messages":[
+            {"role":"user","content":"Weather in Tokyo and London?"},
+            {"role":"assistant","content":null,"tool_calls":[
+                {"id":"call_001","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Tokyo\"}"}},
+                {"id":"call_002","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"London\"}"}}
+            ]},
+            {"role":"tool","content":"{\"temp\":15}","tool_call_id":"call_001"},
+            {"role":"tool","content":"{\"temp\":10}","tool_call_id":"call_002"},
+            {"role":"user","content":"Summarize"}
+        ]}"""
+        val result = RequestParser.parseChatCompletionRequest(body)
+        @Suppress("UNCHECKED_CAST")
+        val messages = result["messages"] as List<Map<String, Any>>
+
+        val assistantMsg = messages[1]
+        @Suppress("UNCHECKED_CAST")
+        val tcList = assistantMsg["tool_calls"] as List<Map<String, Any>>
+        assertEquals(2, tcList.size)
+        assertEquals("call_001", tcList[0]["id"])
+        assertEquals("call_002", tcList[1]["id"])
+
+        // 验证两个 tool 消息的 tool_call_id
+        assertEquals("call_001", messages[2]["tool_call_id"])
+        assertEquals("call_002", messages[3]["tool_call_id"])
+    }
 }

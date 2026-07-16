@@ -57,7 +57,24 @@ object RequestParser {
             map["role"] = role
 
             // 保留 tool_calls（assistant 消息）和 tool_call_id（tool 消息）
-            if (msg.has("tool_calls")) map["tool_calls"] = msg.get("tool_calls")
+            // ★ 修复：把 JSONArray 解析成 List<Map<String, Any>>，避免后续 cast 失败导致多轮 tool calling 上下文错误
+            if (msg.has("tool_calls")) {
+                val tcArray = msg.getJSONArray("tool_calls")
+                val toolCallsList = mutableListOf<Map<String, Any>>()
+                for (j in 0 until tcArray.length()) {
+                    val tcObj = tcArray.getJSONObject(j)
+                    val fnObj = tcObj.optJSONObject("function")
+                    toolCallsList.add(mapOf(
+                        "id" to tcObj.optString("id", ""),
+                        "type" to tcObj.optString("type", "function"),
+                        "function" to mapOf(
+                            "name" to (fnObj?.optString("name", "") ?: ""),
+                            "arguments" to (fnObj?.optString("arguments", "{}") ?: "{}")
+                        )
+                    ))
+                }
+                map["tool_calls"] = toolCallsList
+            }
             if (msg.has("tool_call_id")) map["tool_call_id"] = msg.optString("tool_call_id", "")
 
             // 保留原始 content 结构：字符串或数组（多模态）

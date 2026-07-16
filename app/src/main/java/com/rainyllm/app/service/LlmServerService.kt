@@ -316,10 +316,15 @@ class LlmServerService : Service() {
                     val server = openAIServer ?: return@Thread
                     val prefs = AppPreferences(this@LlmServerService)
                     val timeoutMin = kotlinx.coroutines.runBlocking { prefs.idleTimeoutMin.first() }
+
+                    // 0 = 关闭空闲超时
+                    if (timeoutMin <= 0) return@Thread
+
                     val timeoutMs = timeoutMin * 60_000L
                     val idleMs = System.currentTimeMillis() - server.lastActivityTime
 
-                    if (idleMs > timeoutMs) {
+                    // ★ 修复：只在无活跃推理时才允许休眠，防止 JNI 仍在推理时关闭引擎导致原生崩溃
+                    if (idleMs > timeoutMs && server.activeRequests.get() == 0) {
                         Log.i(TAG, "⏱️ 空闲超时 ${timeoutMin} 分钟，自动停止引擎以释放内存")
                         // 在服务线程中执行停止
                         stopAll()

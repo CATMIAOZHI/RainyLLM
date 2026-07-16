@@ -55,22 +55,23 @@ class OpenAIServer(
     private val stats = ServerStats()
     /** ★ 序列化锁：LiteRT-LM 只支持单一活跃会话，防止并发请求互相干扰 */
     private val inferenceLock = java.util.concurrent.locks.ReentrantLock()
-    @Volatile private var nextLogIndex = java.util.concurrent.atomic.AtomicInteger(0)
+    private val nextLogId = java.util.concurrent.atomic.AtomicLong(0)
     private val requestLog = java.util.concurrent.CopyOnWriteArrayList<LogEntry>()
 
-    /** 暂存响应摘要（handler 先于 logRequest 执行，需滞后写入） */
-    @Volatile
-    private var pendingResponseSummary: String? = null
+    /** ★ 修复：日志最大条数（从 1000 降到 100，防止大量多模态请求导致内存膨胀） */
+    private val maxLogEntries = 100
 
-    /** 暂存请求体（同上 — handler 中读取，serve() 中写入日志） */
-    @Volatile
-    private var pendingRequestBody: String? = null
+    /** ★ 修复：活跃推理计数器，防止空闲超时 watcher 在推理中关闭引擎 */
+    val activeRequests = java.util.concurrent.atomic.AtomicInteger(0)
 
-    /** 暂存 token 计数（sync 路径 — serve() 中滞后写入） */
-    @Volatile
-    private var pendingPromptTokens: Int = 0
-    @Volatile
-    private var pendingCompletionTokens: Int = 0
+    /** ★ 修复：handler 返回值包装，替代全局 pending* 字段，消除请求间串日志 */
+    private data class HandlerResult(
+        val response: Response,
+        val requestBody: String? = null,
+        val responseSummary: String? = null,
+        val promptTokens: Int = 0,
+        val completionTokens: Int = 0
+    )
 
     /** 最近一次推理错误的详细信息（含堆栈），供 UI 调试面板读取 */
     @Volatile
@@ -118,36 +119,27 @@ class OpenAIServer(
         // 交给具体 handler 调用，否则 handler 内部再调会读到空流导致 500
 
         return try {
-            val response = when {
-                method == Method.OPTIONS -> handleCorsPreflight()
-                uri == "/health" || uri == "/" -> handleHealthCheck()
-                uri == "/v1/models" && method == Method.GET -> handleListModels()
+            // ★ 修复：handler 返回 HandlerResult 而非裸 Response，消除全局 pending* 串请求
+            val handled: HandlerResult = when {
+                method == Method.OPTIONS -> HandlerResult(handleCorsPreflight())
+                uri == "/health" || uri == "/" -> HandlerResult(handleHealthCheck())
+                uri == "/v1/models" && method == Method.GET -> HandlerResult(handleListModels())
                 uri == "/v1/chat/completions" && method == Method.POST -> {
                     handleChatCompletion(session)
                 }
-                else -> handleNotFound()
+                else -> HandlerResult(handleNotFound())
             }
 
+            val response = handled.response
             val elapsed = System.currentTimeMillis() - startTime
-            val logIdx = logRequest(method.name, uri, response.status.requestStatus, elapsed)
+            val logId = logRequest(method.name, uri, response.status.requestStatus, elapsed,
+                requestBody = handled.requestBody ?: "",
+                responseSummary = handled.responseSummary ?: "",
+                promptTokens = handled.promptTokens,
+                completionTokens = handled.completionTokens)
 
-            // 如果是 SSE 流式响应，注入 logIndex 以便 send() 完成后更新日志
-            (response as? SseResponse)?.setLogIndex(logIdx)
-
-            // handler 可能先于 logRequest 产生了摘要，滞后写入
-            pendingResponseSummary?.let {
-                setLogEntryAt(logIdx, it, elapsed,
-                    pendingPromptTokens, pendingCompletionTokens)
-                pendingResponseSummary = null
-                pendingPromptTokens = 0
-                pendingCompletionTokens = 0
-            }
-
-            // 请求体同理 — handler 中暂存，此处滞后写入
-            pendingRequestBody?.let {
-                setLogEntryBody(logIdx, it)
-                pendingRequestBody = null
-            }
+            // 如果是 SSE 流式响应，注入 logId 以便 send() 完成后更新日志
+            (response as? SseResponse)?.setLogId(logId)
 
             // CORS preflight 已在 handleCorsPreflight() 中自行添加 headers，无需重复
             if (method != Method.OPTIONS) {
@@ -193,22 +185,23 @@ class OpenAIServer(
         return jsonResponse(Response.Status.OK, data)
     }
 
-    private fun handleChatCompletion(session: IHTTPSession): Response {
-        // ★ 修复：在读取前检查 Content-Length，超限直接返回 413
+    private fun handleChatCompletion(session: IHTTPSession): HandlerResult {
+        // ★ 修复：在读取前检查 Content-Length，超限直接返回 400
         val cl = session.headers["content-length"]?.toIntOrNull() ?: 0
         if (cl > maxBodySize) {
             Log.w(TAG, "请求体过大: $cl bytes > $maxBodySize, 拒绝")
             val resp = newFixedLengthResponse(Response.Status.BAD_REQUEST, "application/json",
                 """{"error":{"message":"Request body too large: $cl bytes (max $maxBodySize). Reduce input or image/audio size."},"type":"request_too_large"}""")
-            return resp
+            return HandlerResult(resp)
         }
 
         val bodyJson = parseBodyUtf8(session)
         if (bodyJson.isBlank())
-            return jsonResponse(Response.Status.BAD_REQUEST,
-                """{"error":{"message":"Empty request body"}}""")
+            return HandlerResult(jsonResponse(Response.Status.BAD_REQUEST,
+                """{"error":{"message":"Empty request body"}}"""))
 
-        pendingRequestBody = bodyJson
+        // ★ 修复：生成请求体摘要而非保存完整内容，防止 Base64 多模态请求导致内存膨胀
+        val logRequestBody = summarizeRequestBody(bodyJson)
 
         val request = RequestParser.parseChatCompletionRequest(bodyJson)
         val isStream = request["stream"] as? Boolean ?: false
@@ -217,8 +210,16 @@ class OpenAIServer(
         // 设计意图：客户端可传任意模型名（实际模型在 App 中选择），但响应必须诚实
         val responseModel = modelId
 
-        // ★ 修复：解析 tool_choice — "none" 时不传工具给引擎
-        val toolChoice = request["tool_choice"] as? String ?: "auto"
+        // ★ 修复：解析 tool_choice — 支持 "auto"/"none"/"required"/指定函数对象
+        val toolChoiceRaw = request["tool_choice"] as? String ?: "auto"
+        // 解析 tool_choice 对象格式 {"type":"function","function":{"name":"xxx"}}
+        // required 和指定函数在 LiteRT-LM 0.14.0 中无法真正实现，明确返回 400 而非静默降级
+        if (toolChoiceRaw == "required" || toolChoiceRaw.startsWith("{\"")) {
+            return HandlerResult(newFixedLengthResponse(
+                Response.Status.BAD_REQUEST, "application/json",
+                """{"error":{"message":"tool_choice='$toolChoiceRaw' is not supported by LiteRT-LM 0.14.0. Use 'auto' or 'none'."},"type":"unsupported_tool_choice"}"""))
+        }
+        val toolChoice = toolChoiceRaw
 
         // ★ 修复：解析 max_tokens — 用于限制单次输出长度（OpenAI 语义）
         val requestMaxTokens = (request["max_tokens"] as? Number)?.toInt()
@@ -242,8 +243,8 @@ class OpenAIServer(
         // ── 解析 messages 数组 ──
         val allMessages = (request["messages"] as? List<Map<String, Any>>) ?: emptyList()
         if (allMessages.isEmpty())
-            return jsonResponse(Response.Status.BAD_REQUEST,
-                """{"error":{"message":"No messages provided"}}""")
+            return HandlerResult(jsonResponse(Response.Status.BAD_REQUEST,
+                """{"error":{"message":"No messages provided"}}"""))
 
         // system 消息
         val systemPrompt = allMessages
@@ -253,8 +254,8 @@ class OpenAIServer(
         // 非 system 消息
         val nonSystem = allMessages.filter { it["role"] != "system" }
         if (nonSystem.isEmpty())
-            return jsonResponse(Response.Status.BAD_REQUEST,
-                """{"error":{"message":"No user/system messages provided"}}""")
+            return HandlerResult(jsonResponse(Response.Status.BAD_REQUEST,
+                """{"error":{"message":"No user/system messages provided"}}"""))
 
         // ★ 关键修复：无状态 API — 所有非 system 消息（含 tool）都是上下文
         // 最后一条消息之前的全部 → initialMessages（预填 KV Cache）
@@ -336,8 +337,8 @@ class OpenAIServer(
         val historyLm = try {
             buildHistoryMessages(historyRaw, systemPrompt, kvMax)
         } catch (e: ContextOverflowException) {
-            return jsonResponse(Response.Status.BAD_REQUEST,
-                """{"error":{"message":"${e.message?.replace("\"", "\\\"")}"}}""")
+            return HandlerResult(jsonResponse(Response.Status.BAD_REQUEST,
+                """{"error":{"message":"${e.message?.replace("\"", "\\\"")}"}}"""))
         }
 
         val promptTokens = if (multimodalContents.size > 1) {
@@ -347,12 +348,24 @@ class OpenAIServer(
             TokenEstimator.estimatePromptTokens(prompt)
         }
 
+        // ★ 修复：完整上下文容量校验 — system + history + current prompt + max_tokens 输出预算
+        val outputBudget = requestMaxTokens?.coerceAtLeast(0) ?: 0
+        val totalContext = historyLm.sumOf { TokenEstimator.estimatePromptTokens(it.toString()) } +
+            (systemPrompt?.let { TokenEstimator.estimatePromptTokens(it) } ?: 0) +
+            promptTokens + outputBudget
+        if (totalContext > kvMax) {
+            return HandlerResult(jsonResponse(Response.Status.BAD_REQUEST,
+                """{"error":{"message":"输入+输出上下文过大：${"%.1f".format(totalContext / 1000.0)}K tokens (含 ${outputBudget} 输出预算)，超过 KV Cache 上限 ${"%.1f".format(kvMax / 1000.0)}K。请缩短对话历史或减少 max_tokens。"}}"""))
+        }
+
         return if (isStream) {
             handleStreamResponse(prompt, systemPrompt, promptTokens, multimodalContents,
-                responseModel, requestSamplerConfig, historyLm, effectiveTools, requestMaxTokens)
+                responseModel, requestSamplerConfig, historyLm, effectiveTools, requestMaxTokens,
+                logRequestBody)
         } else {
             handleSyncResponse(prompt, systemPrompt, promptTokens, multimodalContents,
-                responseModel, requestSamplerConfig, historyLm, effectiveTools, requestMaxTokens)
+                responseModel, requestSamplerConfig, historyLm, effectiveTools, requestMaxTokens,
+                logRequestBody)
         }
     }
 
@@ -457,8 +470,9 @@ private fun handleSyncResponse(
         requestSamplerConfig: SamplerConfig? = null,
         historyMessages: List<com.google.ai.edge.litertlm.Message> = emptyList(),
         tools: List<com.google.ai.edge.litertlm.ToolProvider>? = null,
-        requestMaxTokens: Int? = null
-    ): Response {
+        requestMaxTokens: Int? = null,
+        logRequestBody: String = ""
+    ): HandlerResult {
         val syncStart = System.currentTimeMillis()
         return try {
             val sampler = requestSamplerConfig ?: samplerConfigSupplier?.invoke() ?: defaultSamplerConfig
@@ -488,6 +502,8 @@ private fun handleSyncResponse(
             val actualCompletionTokens: Int
             var toolCallsData: List<ToolCallData>? = null
 
+            // ★ 修复：活跃推理计数，防止空闲超时 watcher 在推理中关闭引擎
+            activeRequests.incrementAndGet()
             runBlocking {
                 inferenceLock.lock()
                 try {
@@ -516,6 +532,9 @@ private fun handleSyncResponse(
                     }
                 } finally {
                     inferenceLock.unlock()
+                    // ★ 修复：推理结束后更新活动时间并递减计数
+                    lastActivityTime = System.currentTimeMillis()
+                    activeRequests.decrementAndGet()
                 }
             }
 
@@ -541,7 +560,8 @@ private fun handleSyncResponse(
                 }
             }
 
-            val finalCompletionTokens = if (actualCompletionTokens > 0)
+            // ★ 修复：应用 max_tokens 截断后的 completion token 报告应与截断后一致
+            val finalCompletionTokens = if (actualCompletionTokens > 0 && finishReason != "length")
                 actualCompletionTokens
             else
                 TokenEstimator.estimateCompletionTokens(truncatedResult)
@@ -566,18 +586,28 @@ private fun handleSyncResponse(
                     durationMs = durationMs
                 )
             )
-            pendingResponseSummary = responseJson
-            pendingPromptTokens = finalPromptTokens
-            pendingCompletionTokens = finalCompletionTokens
-            jsonResponse(Response.Status.OK, responseJson)
+            // ★ 修复：通过 HandlerResult 返回，替代全局 pending* 字段
+            HandlerResult(
+                response = jsonResponse(Response.Status.OK, responseJson),
+                requestBody = logRequestBody,
+                responseSummary = responseJson,
+                promptTokens = finalPromptTokens,
+                completionTokens = finalCompletionTokens
+            )
         } catch (e: Exception) {
             val detail = "推理失败 · 类型: ${e.javaClass.simpleName} · 消息: ${e.message}\n" +
                 "堆栈: ${e.stackTraceToString().take(800)}"
             lastErrorDetail = detail
             Log.e(TAG, detail, e)
-            pendingResponseSummary = "❌ $detail".take(500)
-            jsonResponse(Response.Status.INTERNAL_ERROR,
-                """{"error":{"message":"Inference failed: ${e.message?.replace("\"", "\\\"")}"}}""")
+            // ★ 修复：确保异常路径也递减计数
+            lastActivityTime = System.currentTimeMillis()
+            activeRequests.decrementAndGet()
+            HandlerResult(
+                response = jsonResponse(Response.Status.INTERNAL_ERROR,
+                    """{"error":{"message":"Inference failed: ${e.message?.replace("\"", "\\\"")}"}}"""),
+                requestBody = logRequestBody,
+                responseSummary = "❌ $detail".take(500)
+            )
         }
     }
 
@@ -590,8 +620,9 @@ private fun handleSyncResponse(
         requestSamplerConfig: SamplerConfig? = null,
         historyMessages: List<com.google.ai.edge.litertlm.Message> = emptyList(),
         tools: List<com.google.ai.edge.litertlm.ToolProvider>? = null,
-        requestMaxTokens: Int? = null
-    ): Response {
+        requestMaxTokens: Int? = null,
+        logRequestBody: String = ""
+    ): HandlerResult {
         val sampler = requestSamplerConfig ?: samplerConfigSupplier?.invoke() ?: defaultSamplerConfig
         val config = ConversationConfig(
             systemInstruction = if (systemPrompt != null) Contents.of(systemPrompt) else null,
@@ -602,12 +633,15 @@ private fun handleSyncResponse(
         )
         val conversation = llmEngine.createConversation(config)
         val isMultimodal = multimodalContents.size > 1
-        var sseLogIndex = -1
+        var sseLogId = -1L
 
-        return object : Response(
+        // ★ 修复：提前递增活跃计数，防止空闲超时 watcher 在流式推理期间关闭引擎
+        activeRequests.incrementAndGet()
+
+        val sseResponse = object : Response(
             Response.Status.OK, "text/event-stream", ByteArray(0).inputStream(), -1
         ), SseResponse {
-            override fun setLogIndex(idx: Int) { sseLogIndex = idx }
+            override fun setLogId(id: Long) { sseLogId = id }
 
             override fun send(outputStream: OutputStream) {
                 val streamStart = System.currentTimeMillis()
@@ -688,8 +722,8 @@ private fun handleSyncResponse(
                                 durationMs = elapsed
                             )
                         )
-                        if (sseLogIndex >= 0) {
-                            setLogEntryAt(sseLogIndex,
+                        if (sseLogId >= 0) {
+                            updateLogById(sseLogId,
                                 "SSE 流式 · ${finalCompletionTokens} tokens" +
                                     if (totalResponseText.isNotEmpty()) "\n\n$totalResponseText" else "",
                                 elapsed, finalPromptTokens, finalCompletionTokens)
@@ -722,8 +756,8 @@ private fun handleSyncResponse(
                                 durationMs = elapsed
                             )
                         )
-                        if (sseLogIndex >= 0) {
-                            setLogEntryAt(sseLogIndex,
+                        if (sseLogId >= 0) {
+                            updateLogById(sseLogId,
                                 "SSE 流式 · ${finalCompletionTokens} tokens (max_tokens 截断)" +
                                     if (totalResponseText.isNotEmpty()) "\n\n$totalResponseText" else "",
                                 elapsed, finalPromptTokens, finalCompletionTokens)
@@ -734,9 +768,13 @@ private fun handleSyncResponse(
                     Log.e(TAG, lastErrorDetail, e)
                 } finally {
                     try { conversation.close() } catch (_: Exception) {}
+                    // ★ 修复：流式结束后更新活动时间并递减活跃计数
+                    lastActivityTime = System.currentTimeMillis()
+                    activeRequests.decrementAndGet()
                 }
             }
         }
+        return HandlerResult(response = sseResponse, requestBody = logRequestBody)
     }
 
     /** 写 SSE 数据帧：直接裸写，SSE 自带 data:\\n\\n 帧格式，无需 HTTP chunked */
@@ -774,8 +812,8 @@ private fun handleSyncResponse(
 
     /**
      * 用 UTF-8 读取请求体（绕过 NanoHTTPd parseBody 的默认编码问题）。
-     * 优先按 Content-Length 读，缺失则读取最多 maxBodySize 字节。
-     * 超过 maxBodySize 时返回空字符串（由调用方返回 413）。
+     * 优先按 Content-Length 读，缺失则读取 maxBodySize+1 字节检测超限。
+     * 超过 maxBodySize 时返回空字符串（由调用方返回 400）。
      */
     private fun parseBodyUtf8(session: IHTTPSession): String {
         return try {
@@ -788,8 +826,12 @@ private fun handleSyncResponse(
                 val bytes = session.inputStream.readNBytes(cl)
                 String(bytes, Charsets.UTF_8)
             } else {
-                // 无 Content-Length 时限制读取量
-                val bytes = session.inputStream.readNBytes(maxBodySize)
+                // ★ 修复：无 Content-Length 时多读 1 字节检测超限
+                val bytes = session.inputStream.readNBytes(maxBodySize + 1)
+                if (bytes.size > maxBodySize) {
+                    Log.w(TAG, "请求体过大（无 Content-Length）: 超过 $maxBodySize bytes, 拒绝")
+                    return ""
+                }
                 if (bytes.isEmpty()) "" else String(bytes, Charsets.UTF_8)
             }
         } catch (e: Exception) {
@@ -857,6 +899,7 @@ private fun handleSyncResponse(
     // ── 日志与统计 ────────────────────────────────────────
 
     data class LogEntry(
+        val id: Long,
         val timestamp: Long,
         val method: String,
         val path: String,
@@ -895,26 +938,20 @@ private fun handleSyncResponse(
     fun getPort(): Int = port
 
     /**
-     * 按索引精确更新日志条目（用于 SSE 等异步场景）
+     * ★ 修复：按唯一 ID 更新日志条目（替代数组下标索引，解决列表截断后索引失效问题）
      */
-    private fun setLogEntryAt(
-        index: Int, summary: String, elapsedMs: Long,
+    private fun updateLogById(
+        id: Long, summary: String, elapsedMs: Long,
         promptTokens: Int = 0, completionTokens: Int = 0
     ) {
-        if (index >= 0 && index < requestLog.size) {
-            requestLog[index] = requestLog[index].copy(
+        val idx = requestLog.indexOfFirst { it.id == id }
+        if (idx >= 0) {
+            requestLog[idx] = requestLog[idx].copy(
                 responseSummary = summary,
                 elapsedMs = elapsedMs,
                 promptTokens = promptTokens,
                 completionTokens = completionTokens
             )
-        }
-    }
-
-    /** handler 内部补写请求体到指定索引的日志条目 */
-    private fun setLogEntryBody(index: Int, body: String) {
-        if (index >= 0 && index < requestLog.size) {
-            requestLog[index] = requestLog[index].copy(requestBody = body)
         }
     }
 
@@ -941,24 +978,119 @@ private fun handleSyncResponse(
         }
     }
 
+    /**
+     * ★ 修复：记录日志并返回唯一 ID（替代数组下标），支持后续异步更新
+     */
     private fun logRequest(
         method: String,
         path: String,
         statusCode: Int,
         elapsedMs: Long,
         requestBody: String = "",
-        responseSummary: String = ""
-    ): Int {
-        val entry = LogEntry(System.currentTimeMillis(), method, path, statusCode, elapsedMs,
-            requestBody = requestBody, responseSummary = responseSummary)
+        responseSummary: String = "",
+        promptTokens: Int = 0,
+        completionTokens: Int = 0
+    ): Long {
+        val id = nextLogId.getAndIncrement()
+        val entry = LogEntry(id, System.currentTimeMillis(), method, path, statusCode, elapsedMs,
+            requestBody = requestBody, responseSummary = responseSummary,
+            promptTokens = promptTokens, completionTokens = completionTokens)
         requestLog.add(entry)
-        if (requestLog.size > 1000) requestLog.removeAt(0)
-        return nextLogIndex.getAndIncrement()
+        // ★ 修复：日志上限从 1000 降到 100，防止多模态大请求体导致内存膨胀
+        while (requestLog.size > maxLogEntries) requestLog.removeAt(0)
+        return id
     }
 
-    /** 清空请求日志 */
+    /** 清空请求日志（同时重置 ID 计数器） */
     fun clearRequestLog() {
         requestLog.clear()
+        nextLogId.set(0)
+    }
+
+    /**
+     * ★ 修复：生成请求体摘要，避免完整 Base64 多模态数据进入日志导致 OOM
+     * 保留文本内容前 8K，多模态数据只记录类型和大小
+     */
+    private fun summarizeRequestBody(bodyJson: String): String {
+        return try {
+            val root = JSONObject(bodyJson)
+            val messages = root.optJSONArray("messages")
+            val msgCount = messages?.length() ?: 0
+            val textPreview = StringBuilder()
+            var imageCount = 0
+            var audioCount = 0
+            val imageSizes = mutableListOf<Long>()
+            val audioSizes = mutableListOf<Long>()
+
+            if (messages != null) {
+                for (i in 0 until messages.length()) {
+                    val msg = messages.getJSONObject(i)
+                    val content = msg.opt("content")
+                    when (content) {
+                        is String -> {
+                            if (textPreview.length < 8192) {
+                                textPreview.append("[${msg.optString("role", "?")}] ")
+                                textPreview.append(content.take(200))
+                                textPreview.append("\n")
+                            }
+                        }
+                        is JSONArray -> {
+                            for (j in 0 until content.length()) {
+                                val part = content.getJSONObject(j)
+                                when (part.optString("type")) {
+                                    "text" -> {
+                                        if (textPreview.length < 8192) {
+                                            textPreview.append(part.optString("text", "").take(200))
+                                            textPreview.append("\n")
+                                        }
+                                    }
+                                    "image_url" -> {
+                                        imageCount++
+                                        val url = part.optJSONObject("image_url")?.optString("url", "")
+                                            ?: part.optString("image_url", "")
+                                        if (url.startsWith("data:")) {
+                                            imageSizes.add(url.length.toLong())
+                                        }
+                                    }
+                                    "input_audio" -> {
+                                        audioCount++
+                                        val data = part.optJSONObject("input_audio")?.optString("data", "")
+                                            ?: part.optString("input_audio", "")
+                                        if (data.startsWith("data:")) {
+                                            audioSizes.add(data.length.toLong())
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            val summary = JSONObject().apply {
+                put("messages", msgCount)
+                put("text_preview", textPreview.toString().take(8192))
+                if (imageCount > 0) {
+                    put("images", JSONArray().apply {
+                        for (s in imageSizes) {
+                            put(JSONObject().put("encoded_chars", s).put("omitted", true))
+                        }
+                    })
+                }
+                if (audioCount > 0) {
+                    put("audio", JSONArray().apply {
+                        for (s in audioSizes) {
+                            put(JSONObject().put("encoded_chars", s).put("omitted", true))
+                        }
+                    })
+                }
+                put("original_bytes", bodyJson.length)
+            }
+            summary.toString()
+        } catch (_: Exception) {
+            // JSON 解析失败时直接截断原始文本
+            bodyJson.take(8192)
+        }
     }
 
     /**
@@ -978,10 +1110,10 @@ private fun handleSyncResponse(
     }
 
     /**
-     * SSE 流式响应的标记接口，用于 serve() 注入 logIndex
+     * SSE 流式响应的标记接口，用于 serve() 注入 logId
      */
     private interface SseResponse {
-        fun setLogIndex(idx: Int)
+        fun setLogId(id: Long)
     }
 }
 
